@@ -35,7 +35,7 @@ class SMIB__SG(System):
         return p
 
     def __init__(self, p):
-        sg = SG(p["Vbase"], p["Sbase"], "1")
+        sg = SG(p["Vbase"], p["Sbase"], "1", frequency_Hz=p["frequency_Hz"])
         sg.p["Ka"]["num"], sg.p["Vf0"]["num"] = p["Ka"], p["Vf0"]
         capacitor = Capacitor(p["Vbase"], p["Sbase"], "2")
         source = Infbus(p["Vbase"], p["Sbase"], "4")

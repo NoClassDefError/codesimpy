@@ -24,7 +24,7 @@ Tired of dragging messy control blocks and circuit elements in Simulink / PSCAD?
 ## Requirements
 
 - Python 3.10 or newer.
-- Python packages: `numpy`, `scipy`, and `sympy` (installed automatically by pip). `numba` is optional.
+- Python packages: `numpy`, `scipy`, and `sympy` (installed automatically by pip).
 - Visual Studio Code with the Microsoft Python extension for the graphical interface.
 - Node.js and npm only when developing or rebuilding the extension.
 

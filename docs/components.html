@@ -248,11 +248,13 @@
           substituted). After the power flow, <code>initFromPowerFlow</code> gives an initial guess of the device
           state in the frame of its bus voltage (\(\mathbf v_{dq}=[V,0]^\top\), so \(\theta\) equals the bus angle),
           and the system solves \(\mathbf f_{\text{init}}(\mathbf x)=\mathbf 0\) by least squares, where
-          \(\mathbf f_{\text{init}}\) is every state equation except the frame angles (<code>getFInit</code>). In the
+          \(\mathbf f_{\text{init}}\) is every state equation except the frame angles listed in
+          <code>thetaIndices</code> (<code>getFInit</code>). In the
           steady state \(\mathbf i_{dq}\) at the terminal is \([P,-Q]^\top/V\).</p>
-        <p><strong>RMS model.</strong> In <code>simulateRMS</code> the frame angles and the states listed in
-          <code>rmsDynamicStateNames</code> stay differential and every other state becomes algebraic
-          (\(0=f_i\)); the equations are written in a global frame rotating at 1 pu, so each frame-angle row
+        <p><strong>RMS model.</strong> <code>getRMSEquationsSym</code> returns the EMT model with
+          \(\dot{\mathbf x}_f=0\) as a DAE: \(\dot{\mathbf x}_s=\mathbf f_{\text{rms}}\) for the slow states
+          (<code>thetaIndices</code> and <code>rmsDynamicIndices</code>) and \(\mathbf 0=\mathbf g_{\text{rms}}\) for
+          the others. The equations are written in a global frame rotating at 1 pu, so each frame-angle row
           becomes \(\dot\theta=\omega-1\).</p>
 
         <h3 id="overview">1.6 Overview</h3>
@@ -349,15 +351,28 @@
         <h4>Parameters</h4>
         <div class="table-wrap"><table>
           <tr><th>Code</th><th>Default</th><th>Meaning</th><th>Code</th><th>Default</th><th>Meaning</th></tr>
-          <tr><td><code>Rs</code></td><td class="num">0.0645</td><td>stator resistance</td><td><code>Xl</code></td><td class="num">0.198</td><td>stator leakage</td></tr>
-          <tr><td><code>Rfd</code></td><td class="num">1.9597</td><td>field resistance</td><td><code>Xad</code>, <code>Xaq</code></td><td class="num">0.906, 0.218</td><td>d/q magnetizing reactance</td></tr>
-          <tr><td><code>R1d</code></td><td class="num">0.0039</td><td>d damper resistance</td><td><code>Xfd</code></td><td class="num">0.1281</td><td>field leakage</td></tr>
-          <tr><td><code>R1q</code></td><td class="num">0.00687</td><td>q damper resistance</td><td><code>Xf1d</code></td><td class="num">−0.01783</td><td>field–damper mutual leakage</td></tr>
-          <tr><td><code>Ka</code>, <code>Ta</code></td><td class="num">120, 0.15</td><td>AVR gain and time constant</td><td><code>X1d</code>, <code>X1q</code></td><td class="num">0.0344, 0.1541</td><td>damper leakages</td></tr>
-          <tr><td><code>Kq</code></td><td class="num">0.1</td><td>reactive droop of the AVR</td><td><code>Vf0</code></td><td class="num">0</td><td>field-voltage offset</td></tr>
+          <tr><td><code>Rs</code></td><td class="num">0.003</td><td>stator resistance</td><td><code>Xl</code></td><td class="num">0.15</td><td>stator leakage</td></tr>
+          <tr><td><code>Rfd</code></td><td class="num">0.000605</td><td>field resistance</td><td><code>Xad</code>, <code>Xaq</code></td><td class="num">1.66, 1.61</td><td>d/q magnetizing reactance</td></tr>
+          <tr><td><code>R1d</code></td><td class="num">0.0284</td><td>d damper resistance</td><td><code>Xfd</code></td><td class="num">0.1649</td><td>field leakage</td></tr>
+          <tr><td><code>R1q</code></td><td class="num">0.0650</td><td>q damper resistance</td><td><code>Xf1d</code></td><td class="num">0</td><td>field–damper mutual leakage</td></tr>
+          <tr><td><code>Ka</code>, <code>Ta</code></td><td class="num">120, 0.15</td><td>AVR gain and time constant</td><td><code>X1d</code>, <code>X1q</code></td><td class="num">0.1714, 0.1066</td><td>damper leakages</td></tr>
+          <tr><td><code>Kq</code></td><td class="num">0.1</td><td>reactive droop of the AVR</td><td><code>Vf0</code></td><td class="num">0</td><td>exciter output offset (in \(E_{fd}\) units)</td></tr>
           <tr><td><code>M</code></td><td class="num">2</td><td>inertia</td><td><code>D</code>, <code>Kg</code></td><td class="num">1, 100</td><td>damping and governor gain</td></tr>
           <tr><td><code>w0</code></td><td class="num">1</td><td>initial speed</td><td><code>Rsnub</code>, <code>Csnub</code></td><td class="num">1e4, 1e-4</td><td>declared, not used in the equations</td></tr>
         </table></div>
+        <p>The electrical defaults are Kundur's Example 4.1 machine (555 MVA, 60 Hz; <em>Power System Stability and
+          Control</em>, Sec. 4.2), given as standard parameters in <code>KUNDUR_EXAMPLE_4_1</code> and converted with
+          the classical definitions. The q axis uses the salient-pole form (one damper: \(X_q, X''_q, T''_{q0}\)).
+          The solver integrates in per-unit time \(\tau=\omega_b t\), so converting time constants in seconds to
+          resistances needs the rated frequency: <code>SG(Vb, Sb, index, standard=None, frequency_Hz=60)</code>.</p>
+        <ul>
+          <li><code>SG.standardToFundamental(Xd, Xq, Xl, Xdp, Xdpp, Xqpp, Td0p, Td0pp, Tq0pp, Ra, frequency_Hz)</code>
+            returns the fundamental parameters (time constants in seconds).</li>
+          <li><code>sg.standardParameters(frequency_Hz)</code> returns the standard parameters implied by the current
+            fundamental ones (Kundur Eqs. 4.41–4.42).</li>
+          <li><code>sg.setStandardParameters(frequency_Hz, H=None, **standard)</code> replaces some or all of them in place
+            and, if <code>H</code> is given, sets \(M = 2H\omega_b\).</li>
+        </ul>
         <h4>Flux–current relation</h4>
         <div class="eq">$$
           \mathbf X_d=\begin{bmatrix}X_l+X_{ad} & X_{ad} & X_{ad}\\ X_{ad} & X_{1d}+X_{ad} & X_{ad}+X_{f1d}\\ X_{ad} & X_{ad}+X_{f1d} & X_{fd}+X_{ad}\end{bmatrix},\qquad
@@ -377,7 +392,7 @@
           \begin{aligned}
             \dot\psi_d &= v_d+R_s i_d+\omega\psi_q, & \dot\psi_q &= v_q+R_s i_q-\omega\psi_d,\\
             \dot\psi_{kd} &= -R_{1d}\,i_{kd}, & \dot\psi_{kq} &= -R_{1q}\,i_{kq},\\
-            \dot\psi_{fd} &= V_{f0}+v_r-R_{fd}\,i_{fd}, & \dot v_r &= \frac{-v_r+K_a\left(V_{d,ref}-|\mathbf v|-K_qQ\right)}{T_a},\\
+            \dot\psi_{fd} &= \tfrac{R_{fd}}{X_{ad}}(V_{f0}+v_r)-R_{fd}\,i_{fd}, & \dot v_r &= \frac{-v_r+K_a\left(V_{d,ref}-|\mathbf v|-K_qQ\right)}{T_a},\\
             \dot\theta &= \omega, & \dot\omega &= \frac{P_{ref}-P-(D+K_g)(\omega-\omega_{ref})}{M},
           \end{aligned}
         $$</div>
@@ -386,9 +401,13 @@
         <div class="eq">$$ P-P_{ref}=0,\qquad V+K_qQ-\left(V_{d,ref}^2+V_{q,ref}^2\right)=0 . $$</div>
         <p>The initial guess solves the classical phasor diagram with \(X_q=X_l+X_{aq}\): of the two candidate load
           angles it keeps the one with the larger field current, then builds the fluxes and sets
-          \(v_r=R_{fd}i_{fd}-V_{f0}\), \(\theta=\theta_{bus}-\delta\), \(\omega=\omega_0\). Every equation except
+          \(v_r=X_{ad}i_{fd}-V_{f0}\), \(\theta=\theta_{bus}-\delta\), \(\omega=\omega_0\). Every equation except
           \(\dot\theta\) is an initialization residual. (<code>SMIB__SG</code> uses its own initialization; see
           the system reference.)</p>
+        <h4>RMS model</h4>
+        <p>\(v_r\) and \(\omega\) stay differential; every flux is algebraic. The damper currents then vanish and
+          \(X_{ad}i_{fd}=E_{fd}\), so the machine is the AVR-driven voltage \(E_{fd}\) behind \(X_d/X_q\), with the
+          swing equation in \(\omega\).</p>
 
       </section>
 

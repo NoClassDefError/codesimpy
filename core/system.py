@@ -425,8 +425,8 @@ class System(ABC):
     ) -> dict[str, Any]:
         """Simulate the RMS (phasor) model in the global DQ frame rotating at 1 pu.
 
-        Differential states (frame angles and each device's
-        ``rmsDynamicStateNames``) are integrated; all other states are solved
+        Differential states (each device's ``thetaIndices`` and
+        ``rmsDynamicIndices``) are integrated; all other states are solved
         from ``0 = F_a`` at every step (index-1 DAE by elimination). The
         initial state is the EMT operating point: at ``t = 0`` the DQ and
         alpha-beta frames coincide. States are DQ-frame quantities, and frame

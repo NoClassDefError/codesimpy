@@ -96,74 +96,48 @@ class Device(ABC):
             self.Inputscale = 1 / voltageOutputScale
             self.Outputscale = currentOutputScale
 
+    # A device has four model layers:
+    #   EMT         getStateAndOutputEquationsSym  dx/dtau = f(x, u), output g(x, u)
+    #   power flow  getPowerFlowEquations          static algebraic model
+    #   init        getFInit                       the f rows of every state except theta
+    #   RMS         getRMSEquationsSym             f with dx_f = 0: dx_s = f_rms, 0 = g_rms
+
     @abstractmethod
     def getStateAndOutputEquationsSym(self) -> tuple[Any, Any]:
-        """Return symbolic state derivative ``f`` and port output ``g``."""
+        """EMT model: state derivative ``f`` (per-unit time) and port output ``g``.
+        States are in the device's own dq frame, whose angle ``theta`` is a state;
+        the port quantities ``u`` and ``g`` are in the stationary frame."""
 
     @abstractmethod
     def getPowerFlowEquations(self) -> Any:
-        """Return the device's steady-state power-flow equations."""
+        """Static algebraic model used by the power flow."""
 
     @abstractmethod
     def initFromPowerFlow(self, P: float, Q: float, V: float, theta: float) -> Any:
         """Return an initial state estimate for a power-flow solution."""
 
-    @abstractmethod
-    def getFInit(self) -> Any:
-        """Return symbolic steady-state initialization residuals."""
+    #: Local indices of the frame-angle states ``theta`` (no steady-state row).
+    thetaIndices: tuple[int, ...] = ()
+    #: Local indices of the slow states that stay dynamic in the RMS model
+    #: besides ``theta``.
+    rmsDynamicIndices: tuple[int, ...] = ()
+
+    def getFInit(self) -> sp.Matrix:
+        """The EMT rows ``f_i`` of every state except ``theta`` (steady state: ``0 = f_i``)."""
+        return sp.Matrix([self.f[i] for i in range(self.n) if i not in self.thetaIndices])
 
     # ------------------------------------------------------------------ RMS
-    #: Local state names (without the device index) that remain differential
-    #: in the RMS model besides the frame angles (e.g. ``("delta",)``).
-    rmsDynamicStateNames: tuple[str, ...] = ()
+    def getRMSEquationsSym(self) -> tuple[list[sp.Expr], list[sp.Expr]]:
+        """RMS model: the EMT model with ``dx_f = 0``, a DAE in the DQ frame.
 
-    def getFrameAngleIndices(self) -> list[int]:
-        """Local states without an initialization residual (frame angles)."""
-        withResidual = set(self.getFInitStateIndices())
-        return [i for i in range(self.n) if i not in withResidual]
+        Returns ``(f_rms, g_rms)``, both in state order:
 
-    def getRMSDifferentialIndices(self) -> list[int]:
-        """Local states integrated in the RMS model: frame angles plus
-        ``rmsDynamicStateNames``. All other states are algebraic (``0 = f_i``)."""
-        local = [str(symbol)[: -len(self.index)] for symbol in self.x]
-        unknown = set(self.rmsDynamicStateNames) - set(local)
-        if unknown:
-            raise ValueError(f"{type(self).__name__}: unknown RMS dynamic states {sorted(unknown)}")
-        dynamic = {local.index(name) for name in self.rmsDynamicStateNames}
-        return sorted(set(self.getFrameAngleIndices()) | dynamic)
-
-    def getRMSEquationsSym(self) -> sp.Matrix:
-        """State equations in the global DQ frame rotating at 1 pu.
-
-        A device already works in its own dq frame, whose angle ``theta`` is a
-        frame-angle state. In the global DQ frame that angle is measured
-        relative to the DQ frame, so its derivative is ``w - 1``; every other
-        row is unchanged. The rows of the algebraic states are therefore
-        exactly the ``getFInit`` residuals.
+        * ``dx_s/dtau = f_rms`` for the slow states (``thetaIndices`` and
+          ``rmsDynamicIndices``). ``theta`` is measured relative to the DQ frame
+          rotating at 1 pu, so its row is ``f_theta - 1``.
+        * ``0 = g_rms`` for the fast states (every other state).
         """
-        equations = sp.Matrix(self.f).as_mutable()
-        for index in self.getFrameAngleIndices():
-            equations[index] = equations[index] - 1
-        return equations
-
-    def getFInitStateIndices(self) -> list[int]:
-        """Return the local state index associated with each init residual."""
-        initialization = list(sp.Matrix(self.getFInit()))
-        available = list(enumerate(self.f))
-        indices: list[int] = []
-        for residual in initialization:
-            match = next(
-                (
-                    position for position, (_, equation) in enumerate(available)
-                    if equation == residual
-                ),
-                None,
-            )
-            if match is None:
-                raise ValueError(
-                    f"{type(self).__name__}.getFInit() must return equations "
-                    "from the device state derivative vector"
-                )
-            index, _ = available.pop(match)
-            indices.append(index)
-        return indices
+        slow = set(self.thetaIndices) | set(self.rmsDynamicIndices)
+        f_rms = [self.f[i] - (1 if i in self.thetaIndices else 0) for i in range(self.n) if i in slow]
+        g_rms = [self.f[i] for i in range(self.n) if i not in slow]
+        return f_rms, g_rms

@@ -19,5 +19,3 @@ class ZeroCurrent(Device):
     def convertToAnotherBase(self, Vbnew: float, Sbnew: float) -> None:
         return None
 
-    def getFInit(self):
-        return self.f

@@ -179,39 +179,17 @@ class RLGrid:
         f_init_sym = sp.MutableDenseMatrix(f)
         f_init_sym[: 2 * self.b, :] = branchInit
 
-        Abar = (
-            sp.kronecker_product(sp.Matrix(self.A), sp.eye(2))
-            if self.b else sp.zeros(2 * self.n, 0)
-        )
-        branchState = sp.Matrix(self.ibsym) if self.b else sp.zeros(0, 1)
-        networkCurrent = Abar * branchState
-        voltageStart = 2 * self.b
-        currentStart = voltageStart + 2 * self.n
-        nodeVoltage = g[voltageStart:currentStart, :]
-        deviceCurrent = g[currentStart:currentStart + 2 * self.n, :]
         residualParts: list[sp.Matrix] = [branchInit]
         residualStateIndices = list(range(2 * self.b))
         stateOffset = 2 * self.b
-        for i, (Vdev, Idev) in enumerate(zip(self.Vdev, self.Idev)):
-            indices = [2 * i, 2 * i + 1]
-            voltageInput = [networkCurrent[j] - deviceCurrent[j] for j in indices]
-            substitutions = dict(zip(Vdev.u, [Vdev.Inputscale * item for item in voltageInput]))
-            substitutions.update(dict(zip(Idev.u, [Idev.Inputscale * nodeVoltage[j] for j in indices])))
-            voltageInit, currentInit = Vdev.getFInit(), Idev.getFInit()
-            voltageInit = sp.Matrix(voltageInit) if len(voltageInit) else sp.zeros(0, 1)
-            currentInit = sp.Matrix(currentInit) if len(currentInit) else sp.zeros(0, 1)
+        for device, substitutions in self._devicePortSubstitutions(g):
+            init = device.getFInit()
+            init = sp.Matrix(init) if len(init) else sp.zeros(0, 1)
             residualStateIndices.extend(
-                stateOffset + index for index in Vdev.getFInitStateIndices()
+                stateOffset + i for i in range(device.n) if i not in device.thetaIndices
             )
-            stateOffset += len(Vdev.x)
-            residualStateIndices.extend(
-                stateOffset + index for index in Idev.getFInitStateIndices()
-            )
-            stateOffset += len(Idev.x)
-            residualParts.extend([
-                voltageInit.subs(substitutions, simultaneous=True),
-                currentInit.subs(substitutions, simultaneous=True),
-            ])
+            stateOffset += device.n
+            residualParts.append(init.subs(substitutions, simultaneous=True))
         f_init_residual = sp.Matrix.vstack(*residualParts)
         fInitStateIndices = np.asarray(residualStateIndices, dtype=int)
         if fInitStateIndices.size != f_init_residual.rows:
@@ -259,30 +237,10 @@ class RLGrid:
         return self._wrap(self._modelEntry["AFunction"], matrix=True)
 
     # ------------------------------------------------------------------ RMS
-    def getRMSDifferentialIndices(self) -> list[int]:
-        """Global indices of the states integrated by the RMS model.
-
-        Branch currents are always algebraic (phasor network). Each device
-        contributes its frame angles and ``rmsDynamicStateNames``.
-        """
-        indices: list[int] = []
-        offset = 2 * self.b
-        for Vdev, Idev in zip(self.Vdev, self.Idev):
-            for device in (Vdev, Idev):
-                indices.extend(offset + i for i in device.getRMSDifferentialIndices())
-                offset += len(device.x)
-        return indices
-
-    def getRMSEquationsSym(self) -> sp.Matrix:
-        """RMS model in the global DQ frame rotating at 1 pu: one row per state.
-
-        Branch rows are the phasor network ``L^-1 (A^T v - R i) - J i``, i.e.
-        the existing initialization rows. Device rows come from
-        ``Device.getRMSEquationsSym`` with the same port substitutions as the
-        EMT model. Rows of algebraic states read ``0 = F_a``; rows of
-        differential states read ``dx_d/dtau = F_d``. Read with ``dx_a/dtau =
-        F_a`` the same matrix is the EMT model written in the DQ frame.
-        """
+    def _devicePortSubstitutions(self, g: sp.MatrixBase):
+        """Yield ``(device, substitutions)`` in state order: each device's port
+        input ``u`` written with the grid output ``g`` (node voltages, device
+        currents) and the branch currents."""
         Abar = (
             sp.kronecker_product(sp.Matrix(self.A), sp.eye(2))
             if self.b else sp.zeros(2 * self.n, 0)
@@ -290,46 +248,67 @@ class RLGrid:
         networkCurrent = Abar * (sp.Matrix(self.ibsym) if self.b else sp.zeros(0, 1))
         voltageStart = 2 * self.b
         currentStart = voltageStart + 2 * self.n
-        nodeVoltage = self.g[voltageStart:currentStart, :]
-        deviceCurrent = self.g[currentStart:currentStart + 2 * self.n, :]
-        parts: list[sp.Matrix] = [sp.Matrix(self.f_init_sym[: 2 * self.b, :])]
+        nodeVoltage = g[voltageStart:currentStart, :]
+        deviceCurrent = g[currentStart:currentStart + 2 * self.n, :]
         for i, (Vdev, Idev) in enumerate(zip(self.Vdev, self.Idev)):
             indices = [2 * i, 2 * i + 1]
             voltageInput = [networkCurrent[j] - deviceCurrent[j] for j in indices]
-            voltageSubs = dict(zip(Vdev.u, [Vdev.Inputscale * item for item in voltageInput]))
-            currentSubs = dict(zip(Idev.u, [Idev.Inputscale * nodeVoltage[j] for j in indices]))
-            for device, substitutions in ((Vdev, voltageSubs), (Idev, currentSubs)):
-                equations = device.getRMSEquationsSym()
-                if len(equations):
-                    parts.append(sp.Matrix(equations).subs(substitutions, simultaneous=True))
-        return sp.Matrix.vstack(*parts)
+            yield Vdev, dict(zip(Vdev.u, [Vdev.Inputscale * item for item in voltageInput]))
+            yield Idev, dict(zip(Idev.u, [Idev.Inputscale * nodeVoltage[j] for j in indices]))
+
+    def getRMSEquationsSym(self) -> tuple[sp.Matrix, sp.Matrix, list[int]]:
+        """RMS model of the grid in the DQ frame rotating at 1 pu, as a DAE.
+
+        ``dx_s/dtau = f_rms`` for the slow states (each device's ``f_rms``) and
+        ``0 = g_rms`` for every other state: the branch rows
+        ``L^-1 (A^T v - R i) - J i`` and each device's ``g_rms``, with the same
+        port substitutions as the EMT model. Returns ``(f_rms, g_rms, slow)``,
+        ``slow`` being the global indices of the slow states.
+        """
+        f_rms: list[sp.Expr] = []
+        g_rms: list[sp.Expr] = list(self.f_init_sym[: 2 * self.b, :])
+        slow: list[int] = []
+        offset = 2 * self.b
+        for device, substitutions in self._devicePortSubstitutions(self.g):
+            fDevice, gDevice = device.getRMSEquationsSym()
+            f_rms.extend(sp.Matrix(fDevice).subs(substitutions, simultaneous=True))
+            g_rms.extend(sp.Matrix(gDevice).subs(substitutions, simultaneous=True))
+            slow.extend(offset + i for i in sorted(set(device.thetaIndices) | set(device.rmsDynamicIndices)))
+            offset += device.n
+        return sp.Matrix(f_rms), sp.Matrix(g_rms), slow
 
     @property
     def rms(self) -> dict[str, Any]:
         """Compiled RMS model, built on first use and shared via the model cache.
 
-        Keys: ``differentialIndices``, ``algebraicIndices``, ``F`` (``F(x, u)``),
-        ``A`` (``dF/dx``), ``B`` (``dF/du``), ``F_sym`` and the CSE-form
-        Jacobians ``A_cse`` / ``B_cse`` (see :func:`cseJacobian`).
+        ``F`` has one row per state: ``f_rms`` at the slow (differential) states
+        and ``g_rms`` at the others (algebraic, ``0 = F_a``). Keys:
+        ``differentialIndices``, ``algebraicIndices``, ``F`` (``F(x, u)``), ``A``
+        (``dF/dx``), ``B`` (``dF/du``), ``F_sym`` and the CSE-form Jacobians
+        ``A_cse`` / ``B_cse`` (see :func:`cseJacobian`).
         """
-        differential = tuple(self.getRMSDifferentialIndices())
-        key = ("rms", differential)
-        if key not in self._modelEntry:
-            F = self.getRMSEquationsSym()
+        if "rms" not in self._modelEntry:
+            f_rms, g_rms, slow = self.getRMSEquationsSym()
+            fast = [i for i in range(len(self.x)) if i not in slow]
+            F = sp.zeros(len(self.x), 1)
+            for rows, indices in ((f_rms, slow), (g_rms, fast)):
+                for row, index in zip(rows, indices):
+                    F[index] = row
             # One CSE pass for [dF/dx, dF/du], split afterwards.
             Ax, Bu = splitColumns(*cseJacobian(F, list(self.x) + list(self.u)), len(self.x))
-            self._modelEntry[key] = {
-                "F_sym": sp.ImmutableMatrix(F),
+            self._modelEntry["rms"] = {
+                "differential": tuple(slow), "F_sym": sp.ImmutableMatrix(F),
                 "A_cse": Ax, "B_cse": Bu,
                 "FFunction": self._lambdify(F),
                 "AFunction": self._lambdifyCse(*Ax),
                 "BFunction": self._lambdifyCse(*Bu),
             }
-        entry = self._modelEntry[key]
-        algebraic = tuple(i for i in range(len(self.x)) if i not in set(differential))
+        entry = self._modelEntry["rms"]
+        differential = entry["differential"]
         return {
             "differentialIndices": np.asarray(differential, dtype=int),
-            "algebraicIndices": np.asarray(algebraic, dtype=int),
+            "algebraicIndices": np.asarray(
+                [i for i in range(len(self.x)) if i not in differential], dtype=int),
             "F_sym": entry["F_sym"],
             "A_cse": entry["A_cse"], "B_cse": entry["B_cse"],
             "F": self._wrap(entry["FFunction"]),
@@ -361,32 +340,7 @@ class RLGrid:
             values = np.r_[stateValues, referenceValues, self.parameterMap["parameterValues"]]
             result = np.asarray(function(*values), dtype=float)
             return result if matrix else result.reshape(-1)
-        numeric.generatedFunction = function
         return numeric
-
-    def enableNumba(self, *, FastMath: bool = False) -> bool:
-        """JIT-compile the time-domain derivative when Numba is available."""
-        if hasattr(self, "_numbaDerivative"):
-            return True
-        try:
-            from numba import njit
-        except ImportError:
-            return False
-
-        compiled = njit(self.f_core.generatedFunction, fastmath=FastMath)
-
-        def f_numeric(state: Any, *reference: Any):
-            stateValues = np.asarray(state, dtype=float).reshape(-1)
-            if len(reference) == 1 and np.asarray(reference[0]).size == len(self.u):
-                referenceValues = np.asarray(reference[0], dtype=float).reshape(-1)
-            else:
-                referenceValues = np.asarray(reference, dtype=float).reshape(-1)
-            values = np.r_[stateValues, referenceValues, self.parameterMap["parameterValues"]]
-            return np.asarray(compiled(*values), dtype=float).reshape(-1)
-
-        self.f_numeric = f_numeric
-        self._numbaDerivative = compiled
-        return True
 
     def refreshParameters(self, rebuild: bool = False) -> None:
         symbols: list[Any] = list(self.Lsym) + list(self.Rsym)

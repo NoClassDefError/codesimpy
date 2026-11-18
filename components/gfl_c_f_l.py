@@ -7,7 +7,8 @@ from ..core import Device
 
 class GFL_C_F_L(Device):
     """GFL · C: current references (no outer loop) + current PI, PLL · F: FRT/LVRT reactive-current priority · L: filter inductor only (a terminal capacitor, if any, is a separate Capacitor)."""
-    rmsDynamicStateNames = ("xPLL",)  # differential in the RMS model (besides frame angles)
+    thetaIndices = (4,)
+    rmsDynamicIndices = (5,)  # xPLL
 
     def __init__(self, Vb, Sb, index):
         super().__init__(Vb, Sb, "Current", index, {
@@ -105,12 +106,6 @@ class GFL_C_F_L(Device):
             P - V * self.uref[0],
             Q + V * self.uref[1],
         ]
-
-    def getFInit(self):
-        return sp.Matrix.vstack(
-            self.f[:4, :],
-            self.f[5:6, :],
-        )
 
     def initFromPowerFlow(self, V, theta, P, Q):
         i = sp.Matrix([P / V, -Q / V])

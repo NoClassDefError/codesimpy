@@ -6,6 +6,8 @@ from ..core import Device
 
 
 class Infbus(Device):
+    thetaIndices = (0,)
+
     def __init__(self, Vb: float, Sb: float, index: str) -> None:
         super().__init__(
             Vb, Sb, "Voltage", index,
@@ -29,5 +31,3 @@ class Infbus(Device):
     def convertToAnotherBase(self, Vbnew: float, Sbnew: float) -> None:
         return None
 
-    def getFInit(self):
-        return self.f[1:2, :]

@@ -7,6 +7,8 @@ from ..core import Device
 
 
 class Capacitor(Device):
+    thetaIndices = (2,)
+
     def __init__(self, Vb, Sb, index):
         super().__init__(Vb, Sb, "Voltage", index, {"C": 0.068, "Gd": 0.0, "w": 1.0},
                          ("vCd", "vCq", "thetaC"), ())
@@ -28,9 +30,6 @@ class Capacitor(Device):
 
     def initFromPowerFlow(self, V, theta, P, Q):
         return [abs(V), 0.0, theta]
-
-    def getFInit(self):
-        return self.f[:2, :]
 
     def convertToAnotherBase(self, Vbnew, Sbnew):
         scaleZ = (Vbnew**2 / Sbnew) / (self.Vb**2 / self.Sb)

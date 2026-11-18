@@ -23,10 +23,6 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 
-[project.optional-dependencies]
-# Optional JIT-compiled derivative in core/rl_grid.py
-numba = ["numba"]
-
 [project.scripts]
 codesimpy = "codesimpy.api.cli:CLI.run"
 

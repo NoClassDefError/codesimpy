@@ -8,7 +8,8 @@ from ..core import Device
 
 class GFM_A_C_L(Device):
     """GFM · A: virtual admittance + current PI · C: circular limit on the current reference · L: no terminal capacitor (current port; the grid branch Rg/Lg is in the device)."""
-    rmsDynamicStateNames = ("delta",)  # differential in the RMS model (besides frame angles)
+    thetaIndices = (7,)
+    rmsDynamicIndices = (6,)  # delta
 
     def __init__(self, Vb: float, Sb: float, index: str) -> None:
         super().__init__(
@@ -99,9 +100,6 @@ class GFM_A_C_L(Device):
             self.uref[0] - pccVoltage.dot(current),
             internalVoltage.dot(internalVoltage) - self.uref[1] ** 2,
         ]
-
-    def getFInit(self):
-        return self.f[:7, :]
 
     def initFromPowerFlow(self, V, theta, P, Q):
         w = 1.0

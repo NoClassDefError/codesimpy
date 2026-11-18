@@ -8,7 +8,8 @@ from ..core import Device
 
 class GFM_A_C_LC(Device):
     """GFM · A: virtual admittance + current PI · C: circular limit on the current reference · LC: terminal capacitor in the device (voltage port)."""
-    rmsDynamicStateNames = ("delta",)  # differential in the RMS model (besides frame angles)
+    thetaIndices = (9,)
+    rmsDynamicIndices = (8,)  # delta
 
     def __init__(self, Vb: float, Sb: float, index: str) -> None:
         super().__init__(
@@ -66,9 +67,6 @@ class GFM_A_C_LC(Device):
         il = sp.Matrix([P, -Q]) / V + C * w * J * vc
         vs = vc + (Rv * sp.eye(2) + w * Lv * J) * il
         return [self.uref[0] - P, (vs.T * vs)[0] - self.uref[1] ** 2]
-
-    def getFInit(self):
-        return self.f[:9, :]
 
     def initFromPowerFlow(self, V, theta, P, Q):
         C = self.p["C"]["num"]

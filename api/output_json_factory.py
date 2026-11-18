@@ -392,7 +392,7 @@ class OutputJsonFactory:
         result depends only on the model structure and is cached with it.
         """
         grid = self.system.rlGrid
-        differential = tuple(grid.getRMSDifferentialIndices())
+        differential = tuple(int(i) for i in grid.rms["differentialIndices"])
         key = ("symbolicDescriptor", differential)
         if key in grid._modelEntry:
             return grid._modelEntry[key]
