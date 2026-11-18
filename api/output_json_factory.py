@@ -41,6 +41,8 @@ class OutputJsonFactory:
         self._signalsCache: tuple[Any, list[str], list[dict[str, Any]]] | None = None
         self.latestInteractionAnalysis: dict[str, Any] = {}
         self.latestRMS: dict[str, Any] = {}
+        # (reference at t = 0, serialized power flow) of the last serializePowerFlow call.
+        self._powerFlowCache: tuple[tuple[float, ...], dict[str, Any]] | None = None
         self.outputDirectory = Path(outputDirectory) if outputDirectory else Path(__file__).resolve().parents[2] / "codegen"
         self.preserveExisting = True
 
@@ -247,7 +249,73 @@ class OutputJsonFactory:
             "smallSignal": self.latestSmallSignal,
             "interactionAnalysis": self.latestInteractionAnalysis,
             "rmsSimulation": self.latestRMS,
+            "powerFlow": self.serializePowerFlow(),
         }
+
+    def serializePowerFlow(self) -> dict[str, Any]:
+        """[snapshot] Power-flow solution (``RLGrid.solvePowerFlow``) on the drawn network.
+
+        Values are per unit on the system base; device powers are injected into
+        the network. ``RLGrid`` works on the Kron-reduced network, so the
+        voltages of the removed (device-free) nodes are recovered from the full
+        admittance matrix, ``V_e = -Y_ee^-1 Y_er V_r``. Branch flows are taken
+        at the source (positive) end, ``S = V_src conj(I)``, and at the target
+        end, ``S_to = V_tgt conj(I)``.
+        """
+        reference = np.asarray(self.system.getReference(0.0), dtype=float).reshape(-1)
+        key = tuple(reference.tolist())
+        if self._powerFlowCache is not None and self._powerFlowCache[0] == key:
+            return self._powerFlowCache[1]
+        system, grid = self.system, self.system.rlGrid
+        result: dict[str, Any] = {
+            "available": True, "converged": False, "message": "", "residual": None,
+            "Sbase": system.base["Sbase"], "Vbase": system.base["Vbase"],
+            "buses": {}, "components": {}, "connections": {},
+        }
+        try:
+            grid.refreshParameters()
+            _, info = grid.solvePowerFlow(reference)
+        except Exception as error:  # report the failure instead of breaking the descriptor
+            result["message"] = f"{type(error).__name__}: {error}"
+            self._powerFlowCache = (key, result)
+            return result
+        result.update({
+            "converged": bool(info["success"]) and info["residualInfNorm"] < 1e-6,
+            "message": str(info["output"]["message"]),
+            "residual": float(info["residualInfNorm"]),
+        })
+
+        A = np.asarray(system.network["A"], dtype=float)
+        Z = (np.asarray(system.network["R"], dtype=float).reshape(-1)
+             + 1j * np.asarray(system.network["L"], dtype=float).reshape(-1))
+        retained = np.asarray(system.retainedNodeIndices, dtype=int)
+        empty = np.setdiff1d(np.arange(A.shape[0]), retained)
+        voltage = np.zeros(A.shape[0], dtype=complex)
+        voltage[retained] = info["busVoltage"]
+        if empty.size:
+            Y = A @ np.diag(1 / Z) @ A.T
+            voltage[empty] = -np.linalg.solve(Y[np.ix_(empty, empty)], Y[np.ix_(empty, retained)] @ voltage[retained])
+
+        for i, value in enumerate(voltage):
+            result["buses"][f"bus-{i + 1}"] = {"V": float(abs(value)), "thetaDeg": float(np.degrees(np.angle(value)))}
+        for i in range(A.shape[1]):
+            positive, negative = np.flatnonzero(A[:, i] > 0), np.flatnonzero(A[:, i] < 0)
+            if not positive.size or not negative.size:
+                continue
+            current = (A[:, i] @ voltage) / Z[i]
+            sending = voltage[positive[0]] * np.conj(current)
+            receiving = voltage[negative[0]] * np.conj(current)
+            result["connections"][f"branch-{i + 1}"] = {
+                "P": float(sending.real), "Q": float(sending.imag),
+                "PTo": float(receiving.real), "QTo": float(receiving.imag),
+                "I": float(abs(current)), "loss": float(sending.real - receiving.real),
+            }
+        for device, P, Q in zip(grid.Vdev + grid.Idev, info["Pdevice"], info["Qdevice"]):
+            if device.__class__.__name__ == "ZeroCurrent":
+                continue
+            result["components"][self.describeDevice(device)["id"]] = {"P": float(P), "Q": float(Q)}
+        self._powerFlowCache = (key, result)
+        return result
 
     def cachedSignals(self, simulation: dict[str, Any], busIds: list[str]) -> list[dict[str, Any]]:
         """``buildSignals`` for the descriptor, reused while the simulation is unchanged."""
