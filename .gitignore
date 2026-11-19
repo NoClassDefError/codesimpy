@@ -1,7 +1,8 @@
 slprj/
 .vscode
 .mypy_cache/
-.github/
+.github/*
+!.github/workflows/
 .devcontainer
 .agents
 # Ignore all MATLAB data files
