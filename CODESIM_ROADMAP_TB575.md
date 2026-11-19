@@ -25,7 +25,7 @@ plus the workspace models (`cigre14.py`, `pq_load.py`, `induction_motor.py`, …
   mutual coupling.
 - **Ports are 2-D αβ.** There is no zero sequence and no per-phase representation.
 - **Loads are written as RL branches to a `ground` node held by an `Infbus` at 0 V.** This
-  workaround is in `cigre14.py:assembleNetwork`. Line charging is a `Capacitor` at the bus.
+  workaround is in `_CIGRE14.__init__` in `cigre14.py`. Line charging is a `Capacitor` at the bus.
 - **The power flow is positive-sequence only** (`RLGrid.solvePowerFlow`). Initialization
   looks for a dq equilibrium (`getOperatingPoints` → `least_squares` on `f_init`).
 - **Linearization is done in the global DQ frame**: `A_cse` = the Jacobian of `f_init_sym`,

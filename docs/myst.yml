@@ -1,0 +1,15 @@
+# Jupyter Book 2 (MyST) project for the CodeSim documentation.
+# Build:   cd docs && jupyter book build --html     -> docs/_build/html
+# Preview: cd docs && jupyter book start
+version: 1
+project:
+  title: CodeSim documentation
+  description: Building device models and systems in CodeSim, and the reference of the existing ones.
+  toc:
+    - file: index.md
+    - file: components.md
+    - file: systems.md
+site:
+  template: book-theme
+  options:
+    folders: true

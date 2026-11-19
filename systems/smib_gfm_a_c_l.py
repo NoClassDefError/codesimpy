@@ -45,11 +45,18 @@ class SMIB__GFM_A_C_L(System):
             vsg.p[name]["num"] = p[name]
 
         source = Infbus(p["Vbase"], p["Sbase"], "grid")
+        # Grid voltage ramps down at the fault and back up at clearing
+        # (self.eventTime_s, which an angle-based clearing event sets later).
+        fallDuration = max(p["faultComplete_s"] - p["faultStart_s"], np.finfo(float).eps)
+        riseDuration = max(p["recoveryComplete_s"] - p["recoveryStart_s"], np.finfo(float).eps)
         refs = {
             str(vsg.uref[0]): p["Pref"],
             str(vsg.uref[1]): p["Vref"],
             str(vsg.uref[2]): p["wref"],
-            str(source.uref[0]): lambda t: self.voltageReference(t, p),
+            str(source.uref[0]): lambda t: float(
+                1 - (1 - p["faultVoltage"]) * np.clip((t - p["faultStart_s"]) / fallDuration, 0, 1)
+                + (1 - p["faultVoltage"]) * np.clip((t - self.eventTime_s) / riseDuration, 0, 1)
+            ),
         }
         devices = {
             "Vdev": [source], "Idev": [vsg],
@@ -86,18 +93,6 @@ class SMIB__GFM_A_C_L(System):
         self.eventStateIndex = self.stateNames.index(
             f"{self.clearingState}{self.devices['vsg'].index}"
         )
-
-    def voltageReference(self, t: float, p: dict[str, Any]) -> float:
-        fallDuration = max(
-            p["faultComplete_s"] - p["faultStart_s"], np.finfo(float).eps,
-        )
-        riseDuration = max(
-            p["recoveryComplete_s"] - p["recoveryStart_s"],
-            np.finfo(float).eps,
-        )
-        fall = min(1.0, max(0.0, (t - p["faultStart_s"]) / fallDuration))
-        rise = min(1.0, max(0.0, (t - self.eventTime_s) / riseDuration))
-        return 1 - (1 - p["faultVoltage"]) * fall + (1 - p["faultVoltage"]) * rise
 
     def eventHandler(self, _time_s: float, state: np.ndarray) -> float:
         return float(np.sin(

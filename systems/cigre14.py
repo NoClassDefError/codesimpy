@@ -5,31 +5,9 @@ import numpy as np
 from ..components import Capacitor, GFL_C_F_L, GFM_A_C_LC, Infbus, ZeroCurrent
 from ..core import System
 
-def buildGFL(p, index, deviceClass=GFL_C_F_L):
-    """GFL at bus 7 of class ``GFL_C_F_L``.
-
-    ``GFL_C_F_L`` takes current references directly. ``GFLPref`` is
-    then the d-axis current and ``GFLQref`` the reactive current
-    (``Iqref = -GFLQref``, so ``Q = V GFLQref``), both on the GFL base.
-    Returns the device and its reference values.
-    """
-    gfl = deviceClass(1, p.get("GFLSbase_VA", 1.5e6), index)
-    for sourceName, targetName in (
-        ("GFLLf", "L"), ("GFLKpCc", "Kpcc"), ("GFLKiCc", "Kicc"),
-        ("GFLKpPll", "KpPll"), ("GFLKiPll", "KiPll"),
-        ("GFLKpP", "kpP"), ("GFLKiP", "kiP"),
-        ("GFLKpQ", "kpQ"), ("GFLKiQ", "kiQ"),
-        ("GFLVth", "Vth"), ("GFLK1", "K1"), ("GFLId2", "Id2"), ("GFLImax", "Imax"),
-    ):
-        if sourceName in p and targetName in gfl.p:
-            gfl.p[targetName]["num"] = p[sourceName]
-    Pref, Qref = p.get("GFLPref", 1), p.get("GFLQref", 0)
-    return gfl, (Pref, -Qref)
-
 
 class _CIGRE14(System):
-    """Full CIGRE MV feeder; the GFL class is ``GFL`` (set by the public classes below)."""
-    GFL = GFL_C_F_L
+    """Full CIGRE MV feeder with a GFM at bus 9 and a GFL at bus 7."""
 
     @staticmethod
     def defaultParameters(overrides=None):
@@ -38,8 +16,7 @@ class _CIGRE14(System):
             "Sbase_VA": 25e6, "VbaseLL_V": 20e3, "frequency_Hz": 50,
             "VSGSbase_VA": 5e6, "GFLSbase_VA": 1.5e6, "GFLPref": 1,
             "GFLQref": 0, "GFLLf": 0.07, "GFLKpCc": 0.3, "GFLKiCc": 1,
-            "GFLKpPll": 0.2, "GFLKiPll": 0.02, "GFLKpP": 0.02,
-            "GFLKiP": 0.02, "GFLKpQ": 0.02, "GFLKiQ": 0.02,
+            "GFLKpPll": 0.2, "GFLKiPll": 0.02,
             "VSGPref": 1, "VSGVref": 1.1, "VSGwref": 1,
             "angleClearEligible_s": 0.25, "angleClearLower_rad": -np.pi / 3,
             "angleClearUpper_rad": 0, "faultStart_s": 0.10,
@@ -65,7 +42,18 @@ class _CIGRE14(System):
 
     def __init__(self, p):
         data = self.buildCigreData()
-        incidence, branchR, branchL, nodeNames, busCapacitance = self.assembleNetwork(data)
+        nodeNames = ["source"] + [str(index) for index in range(1, 12)] + ["ground"]
+        connections = [(row[0], row[1]) for row in data["branchTable"]] + [(row[0], "ground") for row in data["loadTable"]]
+        incidence = np.zeros((len(nodeNames), len(connections)))
+        for branchIndex, (fromNode, toNode) in enumerate(connections):
+            incidence[nodeNames.index(fromNode), branchIndex], incidence[nodeNames.index(toNode), branchIndex] = 1, -1
+        branchR = np.array([row[2] for row in data["branchTable"]] + [row[1] for row in data["loadTable"]])
+        branchL = np.array([row[3] for row in data["branchTable"]] + [row[2] for row in data["loadTable"]])
+        # Line charging is lumped as half the line capacitance at each end bus.
+        busCapacitance = np.zeros(len(nodeNames))
+        for fromNode, toNode, _, _, Cline in data["branchTable"]:
+            busCapacitance[nodeNames.index(fromNode)] += Cline / 2
+            busCapacitance[nodeNames.index(toNode)] += Cline / 2
         voltageDevices, currentDevices, referenceMap = [None] * len(nodeNames), [None] * len(nodeNames), {}
         sourceNode, groundNode = nodeNames.index("source"), nodeNames.index("ground")
         gflNode, vsgNode = nodeNames.index("7"), nodeNames.index("9")
@@ -73,7 +61,17 @@ class _CIGRE14(System):
         ground = Infbus(1, p["Sbase_VA"], "cigre_ground"); ground.p["kA"]["num"] = 100
         voltageDevices[sourceNode], voltageDevices[groundNode] = source, ground
         clearingTime_s = np.inf if p["clearMode"] == "angle" else p["recoveryStart_s"]
-        referenceMap[str(source.uref[0])] = lambda t: self.sourceVoltage(t, p)
+        # Source voltage: a step fault cleared at the detected eventTime_s (angle mode),
+        # or the time profile faultStart -> faultComplete down, recoveryStart -> recoveryComplete up.
+        referenceMap[str(source.uref[0])] = (
+            (lambda t: p["faultVoltage"] if p["faultStart_s"] <= t < self.eventTime_s else 1.0)
+            if p["clearMode"] == "angle"
+            else (lambda t: float(np.interp(
+                t, [0, p["faultStart_s"], p["faultComplete_s"], p["recoveryStart_s"],
+                    p["recoveryComplete_s"], p["validationTime_s"]],
+                [1, 1, p["faultVoltage"], p["faultVoltage"], 1, 1], right=1,
+            )))
+        )
         referenceMap[str(ground.uref[0])] = 0.0
         gfl, vsg = None, None
         for nodeIndex, nodeName in enumerate(nodeNames):
@@ -92,9 +90,17 @@ class _CIGRE14(System):
                 for symbol, value in zip(vsg.uref, (p["VSGPref"], p["VSGVref"], p["VSGwref"])):
                     referenceMap[str(symbol)] = value
             if nodeIndex == gflNode:
-                gfl, gflReferences = buildGFL(p, "cigre_gfl_bus7", self.GFL)
-                for symbol, value in zip(gfl.uref, gflReferences):
-                    referenceMap[str(symbol)] = value
+                gfl = GFL_C_F_L(1, p["GFLSbase_VA"], "cigre_gfl_bus7")
+                for sourceName, targetName in (
+                    ("GFLLf", "L"), ("GFLKpCc", "Kpcc"), ("GFLKiCc", "Kicc"),
+                    ("GFLKpPll", "KpPll"), ("GFLKiPll", "KiPll"),
+                    ("GFLVth", "Vth"), ("GFLK1", "K1"), ("GFLId2", "Id2"), ("GFLImax", "Imax"),
+                ):
+                    if sourceName in p:
+                        gfl.p[targetName]["num"] = p[sourceName]
+                # Current references on the GFL base: Iqref = -GFLQref, so Q = V * GFLQref.
+                referenceMap[str(gfl.uref[0])] = p["GFLPref"]
+                referenceMap[str(gfl.uref[1])] = -p["GFLQref"]
                 currentDevices[nodeIndex] = gfl
             else:
                 currentDevices[nodeIndex] = ZeroCurrent(1, p["Sbase_VA"], f"{deviceIndex}_zero")
@@ -137,35 +143,6 @@ class _CIGRE14(System):
             )),
         }
 
-    @staticmethod
-    def assembleNetwork(data):
-        nodeNames = ["source"] + [str(index) for index in range(1, 12)] + ["ground"]
-        connections = [(row[0], row[1]) for row in data["branchTable"]] + [(row[0], "ground") for row in data["loadTable"]]
-        A = np.zeros((len(nodeNames), len(connections)))
-        for branchIndex, (fromNode, toNode) in enumerate(connections):
-            A[nodeNames.index(fromNode), branchIndex], A[nodeNames.index(toNode), branchIndex] = 1, -1
-        R = np.array([row[2] for row in data["branchTable"]] + [row[1] for row in data["loadTable"]])
-        L = np.array([row[3] for row in data["branchTable"]] + [row[2] for row in data["loadTable"]])
-        busCapacitance = np.zeros(len(nodeNames))
-        for fromNode, toNode, Rline, Lline, Cline in data["branchTable"]:
-            busCapacitance[nodeNames.index(fromNode)] += Cline / 2
-            busCapacitance[nodeNames.index(toNode)] += Cline / 2
-        return A, R, L, nodeNames, busCapacitance
-
-    def sourceVoltage(self, time_s, p):
-        time_s = np.asarray(time_s)
-        if p["clearMode"] == "angle":
-            faulted = time_s >= p["faultStart_s"]
-            if np.isfinite(self.eventTime_s):
-                faulted &= time_s < self.eventTime_s
-            voltage = np.ones(time_s.shape)
-            voltage[faulted] = p["faultVoltage"]
-            return float(voltage) if voltage.ndim == 0 else voltage
-        times = [0, p["faultStart_s"], p["faultComplete_s"], p["recoveryStart_s"],
-                 p["recoveryComplete_s"], p["validationTime_s"]]
-        values = [1, 1, p["faultVoltage"], p["faultVoltage"], 1, 1]
-        return np.interp(time_s, times, values, right=1)
-
     def eventHandler(self, _time_s, state):
         p = self.parameters
         angle = (state[self.eventStateIndex] + np.pi) % (2 * np.pi) - np.pi
@@ -193,4 +170,3 @@ class CIGRE14__GFM_A_C_LC__GFL_C_F_L(_CIGRE14):
     """CIGRE14 · GFM_A_C_LC at bus 9 (virtual admittance + current PI, circular current-reference limit; its
     capacitor is the bus-9 line capacitance) + GFL_C_F_L at bus 7 (current references, FRT current priority, no
     outer loop, no filter capacitor). Full feeder with loads and line capacitances."""
-    GFL = GFL_C_F_L

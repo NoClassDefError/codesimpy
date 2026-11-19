@@ -27,3 +27,6 @@ results/
 tmp/
 build/
 *.egg-info/
+
+# Jupyter Book build output
+docs/_build/

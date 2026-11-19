@@ -15,11 +15,14 @@ This toolkit enables numerical simulation, small-signal and interaction analysis
 Tired of dragging messy control blocks and circuit elements in Simulink / PSCAD?  Here are the reasons for choosing CodeSim!
 
 - Symbolic EMT level device and network equations with inspectable state-space ODEs.
-- Auto steady-state initialization and time-domain simulation.
-- Small-signal modes, damping ratios, dominant states, and participation results.
+- Construct device models and systems based on short python objects with templates, which is transparent and AI-friendly.
+- EMT level time-domain simulations with event handling.
+- Auto steady-state initialization and power-flow analysis.
+- Auto convert EMT model into RMS model for time-domain simulations.
+- Symbolic small-signal analysis, eigenvalues, dominant states, and participation factors.
 - Converter-interaction analysis for identifying the critical feedback loop.
 - Well-designed UI for tuning parameters, developing new models, thanks to VS Code platform.
-- Transparent, AI-friendly, light-weight and fast startup.
+- Open source, light-weight and fast startup.
 
 ## Requirements
 
@@ -56,7 +59,7 @@ Then you should see the codesim dialog in the VS Code sidebar. If not, right cli
 Open the Command Palette (The textarea on the top of VSCode) and run:
 
 - **Python: Select Interpreter** to choose the Python environment CodeSim will use.
-- **CodeSim: Select Backend Directory** to select the `codesimpy` checkout from step 1 (keep the folder name `codesimpy`), or a folder that contains it.
+- **CodeSim: Select Backend Directory** to select the `codesimpy` checkout from step 1 (keep the folder name `codesimpy`), or a folder that contains it. You can also click the backend path shown next to the 'Start python backend' button in the CodeSim sidebar.
 
 CodeSim does not keep a separate Python executable setting. Each time the backend starts, it uses the active interpreter from the Microsoft Python extension for the current workspace. To switch environments, stop the CodeSim backend, run **Python: Select Interpreter**, choose the new environment, and start the backend again.
 
@@ -121,7 +124,7 @@ codesimpy/
 │  └─ small_signal_analyzer.py
 ├─ systems/                   Runnable system definitions
 ├─ tests/                     Python unit and service tests (not installed)
-├─ docs/                      Model-building guide, component and system references (HTML)
+├─ docs/                      Jupyter Book sources: model-building guide, component and system references
 ├─ registry.py                @system registry and workspace discovery
 ├─ pyproject.toml             Package metadata
 ├─ README.md

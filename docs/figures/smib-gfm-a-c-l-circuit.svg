@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" role="img" aria-labelledby="smib-title">
+<style>
+  .svg-box { fill: #ffffff; stroke: #c3ccda; stroke-width: 1.5; }
+  .svg-box.blue { stroke: #2f7dd1; } .svg-box.green { stroke: #218b70; }
+  .svg-box.orange { stroke: #db9134; } .svg-box.purple { stroke: #7558be; }
+  .svg-panel { fill: #f1f4f9; stroke: #d7dee9; stroke-width: 1; }
+  .svg-tag { fill: #ffffff; stroke: #657087; stroke-width: 1.2; }
+  .svg-title { fill: #172033; font: 600 15px "Segoe UI", system-ui, sans-serif; }
+  .svg-text { fill: #657087; font: 12.5px "Segoe UI", system-ui, sans-serif; }
+  .svg-mono { fill: #172033; font: 12.5px Consolas, monospace; }
+  .svg-math { fill: #172033; font: italic 15px "Cambria Math", Cambria, "Times New Roman", serif; }
+  .svg-math .sub { font-size: 11px; font-style: normal; } .svg-math .vec { font-weight: 700; }
+  .svg-sign { fill: #657087; font: 600 13px "Segoe UI", system-ui, sans-serif; }
+  .svg-line { stroke: #657087; stroke-width: 1.6; fill: none; } .svg-arrow { fill: #657087; }
+  .svg-wire { stroke: #172033; stroke-width: 1.8; fill: none; } .svg-dot { fill: #172033; }
+  .svg-dash { fill: none; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .svg-dash.blue { stroke: #2f7dd1; } .svg-dash.green { stroke: #218b70; }
+</style>
+<rect x="0" y="0" width="900" height="300" fill="#ffffff" />
+            <title id="smib-title">Circuit of SMIB__GFM_A_C_L</title>
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" class="svg-arrow" />
+              </marker>
+            </defs>
+            <!-- device boundaries -->
+            <rect class="svg-dash blue" x="20" y="24" width="540" height="196" rx="10" />
+            <text class="svg-title" x="34" y="46">GFM_A_C_L · current port Idev[0]</text>
+            <rect class="svg-dash green" x="610" y="96" width="150" height="160" rx="10" />
+            <text class="svg-title" x="622" y="118">Infbus</text>
+            <text class="svg-text" x="622" y="136">voltage port Vdev[0]</text>
+            <!-- control -->
+            <text class="svg-text" x="34" y="68">E = Vref∠δ → Rv + jLv → iu → limit Imax → iref → current PI → bridge</text>
+            <text class="svg-text" x="34" y="86">δ̇ = Kp (Pref − vpcc·i),  θ̇ = ω</text>
+            <!-- bridge -->
+            <rect class="svg-wire" x="50" y="110" width="70" height="70" />
+            <path class="svg-wire" d="M50 180 L120 110" />
+            <text class="svg-mono" x="56" y="128">=</text>
+            <text class="svg-mono" x="104" y="174">~</text>
+            <text class="svg-text" x="54" y="200">bridge</text>
+            <!-- Lf -->
+            <path class="svg-wire" d="M120 145 L170 145" />
+            <path class="svg-wire" d="M170 145 a10 10 0 0 1 20 0 a10 10 0 0 1 20 0 a10 10 0 0 1 20 0 a10 10 0 0 1 20 0" />
+            <text class="svg-mono" x="196" y="124">Lf</text>
+            <path class="svg-wire" d="M250 145 L300 145" />
+            <path class="svg-wire arrowed" d="M262 160 L292 160" marker-end="url(#arrow)" />
+            <text class="svg-mono" x="270" y="178">iL</text>
+            <!-- PCC -->
+            <circle class="svg-dot" cx="300" cy="145" r="4" />
+            <text class="svg-text" x="276" y="208">terminal vt</text>
+            <text class="svg-text" x="276" y="222">(reconstructed)</text>
+            <path class="svg-wire" d="M300 145 L330 145" />
+            <!-- Rg -->
+            <path class="svg-wire" d="M330 145 l5 -8 l10 16 l10 -16 l10 16 l10 -16 l10 16 l5 -8" />
+            <text class="svg-mono" x="350" y="124">Rg</text>
+            <path class="svg-wire" d="M390 145 L410 145" />
+            <!-- Lg -->
+            <path class="svg-wire" d="M410 145 a10 10 0 0 1 20 0 a10 10 0 0 1 20 0 a10 10 0 0 1 20 0 a10 10 0 0 1 20 0" />
+            <text class="svg-mono" x="436" y="124">Lg</text>
+            <path class="svg-wire" d="M490 145 L590 145" />
+            <!-- bus -->
+            <circle class="svg-dot" cx="590" cy="145" r="5" />
+            <path class="svg-wire" d="M590 120 L590 170" />
+            <text class="svg-title" x="540" y="290">bus 0 "Infinite bus" (v_αβ)</text>
+            <path class="svg-wire" d="M590 145 L685 145 L685 165" />
+            <!-- source -->
+            <circle class="svg-wire" cx="685" cy="190" r="25" />
+            <text class="svg-mono" x="676" y="196">~</text>
+            <text class="svg-text" x="716" y="186">Aref(t)</text>
+            <text class="svg-text" x="716" y="202">∠θgrid</text>
+            <path class="svg-wire" d="M685 215 L685 245" />
+            <!-- return -->
+            <path class="svg-wire" d="M85 180 L85 245 L685 245" />
+            <path class="svg-wire" d="M370 245 L370 258 M356 258 L384 258 M362 264 L378 264 M367 270 L373 270" />
+          </svg>

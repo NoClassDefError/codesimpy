@@ -4,7 +4,7 @@ import numpy as np
 
 from ..components import Capacitor, GFL_C_F_L, GFM_A_C_LC, Infbus, ZeroCurrent
 from ..core import System
-from .cigre14 import _CIGRE14, buildGFL
+from .cigre14 import _CIGRE14
 
 
 class _CIGRE4GFMAdmittance(System):
@@ -41,7 +41,14 @@ class _CIGRE4GFMAdmittance(System):
             capacitor.p["Gd"]["num"] = 0
             capacitor.p["w"]["num"] = 1
 
-        gfl, gflReferences = buildGFL(p, "hybrid_cigre_gfl_bus7", self.GFL)
+        gfl = GFL_C_F_L(1, p["GFLSbase_VA"], "hybrid_cigre_gfl_bus7")
+        for sourceName, targetName in (
+            ("GFLLf", "L"), ("GFLKpCc", "Kpcc"), ("GFLKiCc", "Kicc"),
+            ("GFLKpPll", "KpPll"), ("GFLKiPll", "KiPll"),
+            ("GFLVth", "Vth"), ("GFLK1", "K1"), ("GFLId2", "Id2"), ("GFLImax", "Imax"),
+        ):
+            if sourceName in p:
+                gfl.p[targetName]["num"] = p[sourceName]
 
         vsg = GFM_A_C_LC(1, p["VSGSbase_VA"], "hybrid_cigre_vsg_bus9")
         for name, value in (
@@ -62,9 +69,20 @@ class _CIGRE4GFMAdmittance(System):
         ]
         clearingTime_s = np.inf if p["clearMode"] == "angle" else p["recoveryStart_s"]
         references = {
-            str(source.uref[0]): lambda t: self.sourceVoltage(t, p),
-            str(gfl.uref[0]): gflReferences[0],
-            str(gfl.uref[1]): gflReferences[1],
+            # Source voltage: a step fault cleared at the detected eventTime_s (angle mode),
+            # or the time profile faultStart -> faultComplete down, recoveryStart -> recoveryComplete up.
+            str(source.uref[0]): (
+                (lambda t: p["faultVoltage"] if p["faultStart_s"] <= t < self.eventTime_s else 1.0)
+                if p["clearMode"] == "angle"
+                else (lambda t: float(np.interp(
+                    t, [0, p["faultStart_s"], p["faultComplete_s"], p["recoveryStart_s"],
+                        p["recoveryComplete_s"], p["validationTime_s"]],
+                    [1, 1, p["faultVoltage"], p["faultVoltage"], 1, 1], right=1,
+                )))
+            ),
+            # Current references on the GFL base: Iqref = -GFLQref, so Q = V * GFLQref.
+            str(gfl.uref[0]): p["GFLPref"],
+            str(gfl.uref[1]): -p["GFLQref"],
             str(vsg.uref[0]): p["VSGPref"],
             str(vsg.uref[1]): p["VSGVref"],
             str(vsg.uref[2]): p["VSGwref"],
@@ -133,9 +151,6 @@ class _CIGRE4GFMAdmittance(System):
         branchL = np.asarray([branch[1] for branch in reducedBranches])
         return incidence, branchR, branchL, busNames, busCapacitance
 
-    def sourceVoltage(self, time_s, p):
-        return _CIGRE14.sourceVoltage(self, time_s, p)
-
     def eventHandler(self, time_s, state):
         return _CIGRE14.eventHandler(self, time_s, state)
 
@@ -147,5 +162,4 @@ class CIGRE4__GFM_A_C_LC__GFL_C_F_L(_CIGRE4GFMAdmittance):
     """CIGRE4 · GFM_A_C_LC at bus 9 (virtual admittance + current PI, circular current-reference limit; its
     capacitor is the bus-9 line capacitance, no converter filter capacitor) + GFL_C_F_L at bus 7 (current
     references, FRT current priority; bus-7 line capacitance only). The p261030 tier-A benchmark."""
-    GFL = GFL_C_F_L
 

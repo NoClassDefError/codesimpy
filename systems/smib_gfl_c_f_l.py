@@ -12,7 +12,7 @@ class SMIB__GFL_C_F_L(System):
     @staticmethod
     def defaultParameters(overrides=None):
         p = {
-            "SCR": 2, "rho": 0.25, "Pref": 1, "Qref": 0.1,
+            "SCR": 2, "rho": 0.25, "Pref": 1, "Qref": -0.1,
             "K1": 1, "Id2": 1.0,
             "frequency_Hz": 50, "validationTime_s": 1,
             "faultStart_s": 0.3, "faultComplete_s": 0.301,
@@ -40,7 +40,8 @@ class SMIB__GFL_C_F_L(System):
         for name in ("Rg", "Lg", "K1", "Id2"):
             gfl.p[name]["num"] = p[name]
         source = Infbus(1, 8100, "2")
-        refs = {str(gfl.uref[0]): p["Pref"], str(gfl.uref[1]): p["Qref"], str(source.uref[0]): p["gridVoltage"]}
+        # Same convention as the CIGRE systems: Iqref = -Qref, so a positive Qref injects reactive power.
+        refs = {str(gfl.uref[0]): p["Pref"], str(gfl.uref[1]): -p["Qref"], str(source.uref[0]): p["gridVoltage"]}
         devices = {"Vdev": [source], "Idev": [gfl], "gfl": gfl, "source": source}
         network = {
             "A": np.empty((1, 0)), "R": [], "L": [],

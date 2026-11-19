@@ -41,16 +41,13 @@ class SG(Device):
             "Kq": 0.1, "Ka": 120.0, "Ta": 0.15, "Vf0": 0.0,
             "D": 1.0, "M": 2.0, "Kg": 100.0,
         }
-        Gd, Gq = self._inverseInductances(fundamental)
-        for row in range(3):
-            for column in range(3):
-                parameters[f"Gd{row + 1}{column + 1}"] = Gd[row, column]
-        for row in range(2):
-            for column in range(2):
-                parameters[f"Gq{row + 1}{column + 1}"] = Gq[row, column]
+        # Inverse-inductance entries are filled by _refreshInverseInductances below.
+        parameters.update({f"Gd{row}{column}": 0.0 for row in range(1, 4) for column in range(1, 4)})
+        parameters.update({f"Gq{row}{column}": 0.0 for row in range(1, 3) for column in range(1, 3)})
         super().__init__(Vb, Sb, "Current", index, parameters,
                          ("psi_d", "psi_kd", "psi_fd", "psi_q", "psi_kq1", "vr", "theta", "w"),
                          ("Pref", "Vdref", "Vqref", "wref"))
+        self._refreshInverseInductances()
 
     @staticmethod
     def standardToFundamental(Xd, Xq, Xl, Xdp, Xdpp, Xqpp, Td0p, Td0pp, Tq0pp, Ra=0.0,
@@ -113,16 +110,12 @@ class SG(Device):
             self.p["M"]["num"] = 2 * H * 2 * np.pi * frequency_Hz
         self._refreshInverseInductances()
 
-    @staticmethod
-    def _inverseInductances(p):
-        Xl, Xad, Xfd, Xf1d, X1d, X1q, Xaq = (p[name] for name in ("Xl", "Xad", "Xfd", "Xf1d", "X1d", "X1q", "Xaq"))
+    def _refreshInverseInductances(self):
+        Xl, Xad, Xfd, Xf1d, X1d, X1q, Xaq = (
+            self.p[name]["num"] for name in ("Xl", "Xad", "Xfd", "Xf1d", "X1d", "X1q", "Xaq"))
         Gd = np.linalg.inv(np.array([[Xl + Xad, Xad, Xad], [Xad, X1d + Xad, Xad + Xf1d],
                                      [Xad, Xad + Xf1d, Xfd + Xad]]))
         Gq = np.linalg.inv(np.array([[Xl + Xaq, Xaq], [Xaq, Xaq + X1q]]))
-        return Gd, Gq
-
-    def _refreshInverseInductances(self):
-        Gd, Gq = self._inverseInductances({name: self.p[name]["num"] for name in _FUNDAMENTAL_NAMES})
         for row in range(3):
             for column in range(3):
                 self.p[f"Gd{row + 1}{column + 1}"]["num"] = Gd[row, column]
@@ -163,35 +156,51 @@ class SG(Device):
         ]
 
     def getPowerFlowEquations(self, V, theta, P, Q):
-        return [P - self.uref[0], V + self.p["Kq"]["num"] * Q - (self.uref[1]**2 + self.uref[2]**2)]
-
-
-    def initFromPowerFlow(self, V, theta, P, Q):
-        voltageMagnitude = abs(V)
-        w = self.p["w0"]["num"]
-        Rs = self.p["Rs"]["num"]
-        Xq = self.p["Xl"]["num"] + self.p["Xaq"]["num"]
-        activeCurrent, reactiveCurrent = P / voltageMagnitude, Q / voltageMagnitude
+        # Equilibrium of the dynamic model at the grid frequency w = w0:
+        #   dw = 0  -> P = Pref + (D + Kg) * (wref - w0)
+        #   dvr = 0 and dpsi_fd = 0 -> Xad * ifd = Vf0 + Ka * (Vdref - |v| - Kq * Q)
+        # The AVR is proportional, so |v| does not settle at Vdref. Of the two
+        # machine-angle candidates, the one with positive field current is taken.
+        Pref, Vdref, _, wref = self.uref
+        p = {name: entry["num"] for name, entry in self.p.items()}
+        w, Rs = p["w0"], p["Rs"]
+        Xd, Xq = p["Xl"] + p["Xad"], p["Xl"] + p["Xaq"]
+        activeCurrent, reactiveCurrent = P / V, Q / V
         cosineCoefficient = V + Rs * activeCurrent + w * Xq * reactiveCurrent
         sineCoefficient = Rs * reactiveCurrent - w * Xq * activeCurrent
-        deltaCandidate = np.arctan2(-cosineCoefficient, sineCoefficient)
-        bestFieldCurrent, bestState = -np.inf, None
-        for delta in (deltaCandidate, deltaCandidate + np.pi):
-            vd, vq = V * np.cos(delta), V * np.sin(delta)
-            id = activeCurrent * np.cos(delta) + reactiveCurrent * np.sin(delta)
-            iq = activeCurrent * np.sin(delta) - reactiveCurrent * np.cos(delta)
-            psiQ = -Xq * iq
-            psiD = (vq + Rs * iq) / w
-            Xd = self.p["Xl"]["num"] + self.p["Xad"]["num"]
-            fieldCurrent = (psiD + Xd * id) / self.p["Xad"]["num"]
-            psiKd = -self.p["Xad"]["num"] * id + (self.p["Xad"]["num"] + self.p["Xf1d"]["num"]) * fieldCurrent
-            psiFd = -self.p["Xad"]["num"] * id + (self.p["Xfd"]["num"] + self.p["Xad"]["num"]) * fieldCurrent
-            psiKq = -self.p["Xaq"]["num"] * iq
-            regulatorState = self.p["Xad"]["num"] * fieldCurrent - self.p["Vf0"]["num"]
-            if fieldCurrent > bestFieldCurrent:
-                bestFieldCurrent = fieldCurrent
-                bestState = [psiD, psiKd, psiFd, psiQ, psiKq, regulatorState, theta - delta, w]
-        return bestState
+        delta = sp.atan2(-cosineCoefficient, sineCoefficient)
+        vq = V * sp.sin(delta)
+        id = activeCurrent * sp.cos(delta) + reactiveCurrent * sp.sin(delta)
+        iq = activeCurrent * sp.sin(delta) - reactiveCurrent * sp.cos(delta)
+        psiD = (vq + Rs * iq) / w
+        fieldCurrent = sp.Abs((psiD + Xd * id) / p["Xad"])
+        return [
+            P - Pref - (p["D"] + p["Kg"]) * (wref - p["w0"]),
+            p["Xad"] * fieldCurrent - p["Vf0"] - p["Ka"] * (Vdref - V - p["Kq"] * Q),
+        ]
+
+    def initFromPowerFlow(self, V, theta, P, Q):
+        V = abs(V)
+        p = {name: entry["num"] for name, entry in self.p.items()}
+        w, Rs = p["w0"], p["Rs"]
+        Xd, Xq = p["Xl"] + p["Xad"], p["Xl"] + p["Xaq"]
+        activeCurrent, reactiveCurrent = P / V, Q / V
+        cosineCoefficient = V + Rs * activeCurrent + w * Xq * reactiveCurrent
+        sineCoefficient = Rs * reactiveCurrent - w * Xq * activeCurrent
+        delta = np.arctan2(-cosineCoefficient, sineCoefficient)
+        id = activeCurrent * np.cos(delta) + reactiveCurrent * np.sin(delta)
+        iq = activeCurrent * np.sin(delta) - reactiveCurrent * np.cos(delta)
+        psiD = (V * np.sin(delta) + Rs * iq) / w
+        fieldCurrent = (psiD + Xd * id) / p["Xad"]
+        if fieldCurrent < 0:
+            # The angle delta + pi negates every dq quantity; take the positive-field one.
+            delta, id, iq, psiD, fieldCurrent = delta + np.pi, -id, -iq, -psiD, -fieldCurrent
+        psiQ = -Xq * iq
+        psiKd = -p["Xad"] * id + (p["Xad"] + p["Xf1d"]) * fieldCurrent
+        psiFd = -p["Xad"] * id + (p["Xfd"] + p["Xad"]) * fieldCurrent
+        psiKq = -p["Xaq"] * iq
+        regulatorState = p["Xad"] * fieldCurrent - p["Vf0"]
+        return [psiD, psiKd, psiFd, psiQ, psiKq, regulatorState, theta - delta, w]
 
     def convertToAnotherBase(self, Vbnew, Sbnew):
         kZ = (Vbnew**2 / Sbnew) / (self.Vb**2 / self.Sb)
