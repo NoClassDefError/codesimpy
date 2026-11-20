@@ -52,7 +52,7 @@ class SMIB__GFL_C_F_L(System):
         )
         self.solverSettings = {
             "method": "DOP853",
-            "max_step": 5e-3 / (2 * np.pi * self.base["frequency_Hz"]),
+            "max_step": 0.1 / (2 * np.pi * self.base["frequency_Hz"]),
             "rtol": 1e-3,
             "atol": 1e-5,
         }

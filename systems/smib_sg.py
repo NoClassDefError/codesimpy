@@ -45,7 +45,7 @@ class SMIB__SG(System):
                    "busNames": ["SG PCC", "Infinite bus"]}
         super().__init__(type(self).__name__, network, devices,
                          {"Vbase": p["Vbase"], "Sbase": p["Sbase"], "frequency_Hz": p["frequency_Hz"]}, refs)
-        self.solverSettings["max_step"] = 5e-3 / (2 * np.pi * p["frequency_Hz"])
+        self.solverSettings.update({"max_step": 0.1 / (2 * np.pi * p["frequency_Hz"]), "rtol": 1e-4, "atol": 1e-6})
         self.parameters, self.parameterNames = p, list(p)
 
     def calculateSignals(self, time_s, state, networkSignals):

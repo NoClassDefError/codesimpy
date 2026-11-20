@@ -100,9 +100,12 @@ class _CIGRE4GFMAdmittance(System):
             {"Vbase": 1, "Sbase": p["Sbase_VA"], "frequency_Hz": p["frequency_Hz"]},
             references,
         )
-        self.solverSettings["max_step"] = (
-            p["maximumStep_tau"] / (2 * np.pi * p["frequency_Hz"])
-        )
+        self.solverSettings = {
+            "method": "DOP853",
+            "max_step": 0.1 / (2 * np.pi * p["frequency_Hz"]),
+            "rtol": 1e-3,
+            "atol": 1e-5,
+        }
         self.parameters, self.parameterNames = p, list(p)
         self.busCapacitance = busCapacitance
         self.qssRequiredSlowStateNames = []

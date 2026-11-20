@@ -23,7 +23,7 @@ class _CIGRE14(System):
             "faultComplete_s": 0.101, "recoveryStart_s": 0.25,
             "recoveryComplete_s": 0.2501, "faultVoltage": 0.1,
             "validationTime_s": 1, "outputStep_s": 1e-4,
-            "maximumStep_tau": 2e-3, "clearMode": "time",
+            "maximumStep_tau": 0.05, "clearMode": "time",
             "residualTolerance": 1e-4,
         }
         if overrides.get("clearMode") == "angle":
@@ -111,7 +111,7 @@ class _CIGRE14(System):
                          {"Vbase": 1, "Sbase": p["Sbase_VA"], "frequency_Hz": p["frequency_Hz"]}, referenceMap)
         self.solverSettings = {
             "method": "DOP853",
-            "max_step": 5e-3 / (2 * np.pi * self.base["frequency_Hz"]),
+            "max_step": 0.1 / (2 * np.pi * self.base["frequency_Hz"]),
             "rtol": 1e-3,
             "atol": 1e-5,
         }

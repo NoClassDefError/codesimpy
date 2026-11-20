@@ -76,7 +76,7 @@ class SMIB__GFM_A_C_L(System):
         super().__init__(type(self).__name__, network, devices, base, refs)
         self.solverSettings = {
             "method": "RK45",
-            "max_step": 5e-3 / (2 * np.pi * self.base["frequency_Hz"]),
+            "max_step": 0.1 / (2 * np.pi * self.base["frequency_Hz"]),
             "rtol": 1e-3,
             "atol": 1e-5,
         }

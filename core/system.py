@@ -300,7 +300,9 @@ class System(ABC):
         eventStart = [] if self.eventStartTime_s is None else [self.eventStartTime_s]
         boundaries = np.r_[breakpoints, eventStart, time_s[-1]]
         if self.outputJsonFactory.streaming:
-            chunkSize = max(1, int(self.outputJsonFactory.chunkSize))
+            # Every chunk end restarts solve_ivp (step size re-selected from scratch), so
+            # stream about 40 updates per run rather than a fixed, small sample count.
+            chunkSize = max(1, int(self.outputJsonFactory.chunkSize), time_s.size // 40)
             chunkEnds = np.arange(chunkSize - 1, time_s.size, chunkSize)
             boundaries = np.r_[boundaries, time_s[chunkEnds]]
         boundaries = np.unique(boundaries)
@@ -475,7 +477,7 @@ class System(ABC):
         streaming = self.outputJsonFactory.streaming
         if streaming:
             # Integrate chunk by chunk so finished samples can be streamed.
-            chunkSize = max(1, int(self.outputJsonFactory.chunkSize))
+            chunkSize = max(1, int(self.outputJsonFactory.chunkSize), time_s.size // 40)
             boundaries = np.unique(np.r_[
                 boundaries, time_s[np.arange(chunkSize - 1, time_s.size, chunkSize)],
             ])
