@@ -1004,9 +1004,10 @@ class SMIB__GFM_A_C_L(System):
 
 ### In VS Code
 
-1. Restart the Python backend (power button in the topology toolbar); it reads the workspace files when it starts.
-1. Select the system by its `label`, edit parameters, and run {kbd}`EMT`, {kbd}`RMS`, {kbd}`Small signal` or {kbd}`Interaction`. Files that fail to import are reported with their error.
-1. Check the equations in Small signal → *Symbolic model*, one device at a time.
+![alt text](figures/image.png)
+1. Select your workspace folder that includes the system python file, then restart the Python backend (power button in the topology toolbar).
+2. Select the system by its `label`, edit parameters, and run {kbd}`EMT`, {kbd}`RMS`, {kbd}`Small signal` or {kbd}`Interaction`. Files that fail to import are reported with their error.
+3. Check the equations in Small signal → *Symbolic model*, one device at a time.
 
 ### From Python
 

@@ -6,7 +6,8 @@ project:
   title: CodeSim documentation
   description: Building device models and systems in CodeSim, and the reference of the existing ones.
   toc:
-    - file: index.md
+    - file: ../README.md
+    - file: guide.md
     - file: components.md
     - file: systems.md
 site:

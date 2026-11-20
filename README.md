@@ -59,7 +59,7 @@ Then you should see the codesim dialog in the VS Code sidebar. If not, right cli
 Open the Command Palette (The textarea on the top of VSCode) and run:
 
 - **Python: Select Interpreter** to choose the Python environment CodeSim will use.
-- **CodeSim: Select Backend Directory** to select the `codesimpy` checkout from step 1 (keep the folder name `codesimpy`), or a folder that contains it. You can also click the backend path shown next to the 'Start python backend' button in the CodeSim sidebar.
+- **CodeSim: Select Backend** and choose **Installed package (pip)** to use the `codesimpy` installed in step 1, or **Source checkout…** to select a cloned `codesimpy` folder (keep the folder name `codesimpy`) or a folder that contains it. You can also click the backend path shown next to the 'Start python backend' button in the CodeSim sidebar.
 
 CodeSim does not keep a separate Python executable setting. Each time the backend starts, it uses the active interpreter from the Microsoft Python extension for the current workspace. To switch environments, stop the CodeSim backend, run **Python: Select Interpreter**, choose the new environment, and start the backend again.
 
