@@ -13,3 +13,7 @@ site:
   template: book-theme
   options:
     folders: true
+    logo: figures/logo.png
+    logo_text: CodeSim
+    favicon: figures/logo.png
+
