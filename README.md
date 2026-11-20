@@ -1,8 +1,8 @@
+# CodeSim - Building power system symbolically!
+
 <p align="center">
   <img src="Icon.png" alt="CodeSim icon" width="160">
 </p>
-
-# CodeSim - Building power system symbolically!
 
 CodeSim is a Python-first toolkit for modelling and analysing converter-dominated power systems. 
 It allows you to build device models and power systems completely based on symbolic equations.
