@@ -12,20 +12,20 @@ Every system is a `System` subclass that builds a list of devices and an RL netw
 (sys-rlgrid)=
 ### 1.1 Branch and bus equations
 
-The network has $n$ buses and $b$ series RL branches. The incidence matrix $\mathbf A\in\mathbb R^{n\times b}$ has $A_{mk}=+1$ at the bus where branch $k$ leaves and $-1$ where it enters. Each bus $m$ holds exactly one voltage port $V_m$ and one current port $I_m$. The branch currents are the first $2b$ states (`iga1, igb1, …`), followed bus by bus by the states of $V_m$ and $I_m$.
+The network has $n$ buses and $b$ series RL branches. The incidence matrix $\bm A\in\mathbb R^{n\times b}$ has $A_{mk}=+1$ at the bus where branch $k$ leaves and $-1$ where it enters. Each bus $m$ holds exactly one voltage port $V_m$ and one current port $I_m$. The branch currents are the first $2b$ states (`iga1, igb1, …`), followed bus by bus by the states of $V_m$ and $I_m$.
 
 $$
 \begin{aligned}
-            \mathbf v_m &= \mathbf g_{V_m}\!\left(\mathbf x_{V_m}\right) &&\text{bus voltage from the voltage port}\\
-            \mathbf i^{I}_m &= \mathbf g_{I_m}\!\left(\mathbf x_{I_m},\mathbf v_m\right) &&\text{current-port injection}\\
-            L_k\,\dot{\mathbf i}_k &= \sum_m A_{mk}\,\mathbf v_m-R_k\,\mathbf i_k &&\text{branch }k\;(\alpha\beta)\\
-            \mathbf i^{V}_m &= \sum_k A_{mk}\,\mathbf i_k-\mathbf i^{I}_m &&\text{current delivered by the voltage port}
+            \bm v_m &= \bm g_{V_m}\!\left(\bm x_{V_m}\right) &&\text{bus voltage from the voltage port}\\
+            \bm i^{I}_m &= \bm g_{I_m}\!\left(\bm x_{I_m},\bm v_m\right) &&\text{current-port injection}\\
+            L_k\,\dot{\bm i}_k &= \sum_m A_{mk}\,\bm v_m-R_k\,\bm i_k &&\text{branch }k\;(\alpha\beta)\\
+            \bm i^{V}_m &= \sum_k A_{mk}\,\bm i_k-\bm i^{I}_m &&\text{current delivered by the voltage port}
           \end{aligned}
 $$
 
-so each voltage port supplies whatever its bus sends into the branches minus what the current port injects (KCL), and its state equations receive $\mathbf i^{V}_m$. In compact form, with $\bar{\mathbf A}=\mathbf A\otimes\mathbf I_2$, $\dot{\mathbf i}_b=\mathbf L^{-1}(\bar{\mathbf A}^{\top}\mathbf v-\mathbf R\,\mathbf i_b)$. Since the frame is stationary, the branches carry no $\omega L\mathbf J$ terms. When a device base $(V_b,S_b)$ differs from the system base, its port input and output are scaled by $V_b/V_{b,sys}$ and $I_b/I_{b,sys}$ (`Inputscale`, `Outputscale`).
+so each voltage port supplies whatever its bus sends into the branches minus what the current port injects (KCL), and its state equations receive $\bm i^{V}_m$. In compact form, with $\bar{\bm A}=\bm A\otimes\bm I_2$, $\dot{\bm i}_b=\bm L^{-1}(\bar{\bm A}^{\top}\bm v-\bm R\,\bm i_b)$. Since the frame is stationary, the branches carry no $\omega L\bm J$ terms. When a device base $(V_b,S_b)$ differs from the system base, its port input and output are scaled by $V_b/V_{b,sys}$ and $I_b/I_{b,sys}$ (`Inputscale`, `Outputscale`).
 
-The output vector of the grid is $[\mathbf i_b;\mathbf v;\mathbf i^{I}]$, from which `calculateNetworkSignals` derives the bus injections $\bar{\mathbf A}\mathbf i_b$, the bus powers $\underline v_m(\sum_k A_{mk}\underline i_k)^{*}$ and the device powers.
+The output vector of the grid is $[\bm i_b;\bm v;\bm i^{I}]$, from which `calculateNetworkSignals` derives the bus injections $\bar{\bm A}\bm i_b$, the bus powers $\underline v_m(\sum_k A_{mk}\underline i_k)^{*}$ and the device powers.
 
 (sys-kron)=
 ### 1.2 Passive buses
@@ -38,12 +38,12 @@ A bus with `None` as both its voltage and current device is removed by Kron redu
 The unknowns are every bus voltage $V_m\angle\theta_m$ and the $P_d, Q_d$ of every device. The equations are the bus balances and two device equations each ([component reference](#cmp-init)):
 
 $$
-\mathbf Y=\mathbf A\,\operatorname{diag}\!\left(\frac{1}{R_k+jL_k}\right)\mathbf A^{\top},\qquad
-          \underline V_m\left(\mathbf Y\underline{\mathbf V}\right)_m^{*}=\sum_{d\in m}\left(P_d+jQ_d\right),\qquad
+\bm Y=\bm A\,\operatorname{diag}\!\left(\frac{1}{R_k+jL_k}\right)\bm A^{\top},\qquad
+          \underline V_m\left(\bm Y\underline{\bm V}\right)_m^{*}=\sum_{d\in m}\left(P_d+jQ_d\right),\qquad
           F_d(P_d,Q_d,V_m,\theta_m)=0 .
 $$
 
-They are solved from a flat start with `scipy.optimize.root` (hybrid method). Branch currents are then $(\underline V_{from}-\underline V_{to})/(R_k+jL_k)$, each device builds its initial guess, and the steady state is refined by least squares on $\mathbf f_{\text{init}}(\mathbf x)=\mathbf 0$ (every state equation except the frame angles). The system raises an error if either residual exceeds `residualTolerance`.
+They are solved from a flat start with `scipy.optimize.root` (hybrid method). Branch currents are then $(\underline V_{from}-\underline V_{to})/(R_k+jL_k)$, each device builds its initial guess, and the steady state is refined by least squares on $\bm f_{\text{init}}(\bm x)=\bm 0$ (every state equation except the frame angles). The system raises an error if either residual exceeds `residualTolerance`.
 
 (sys-faults)=
 ### 1.4 Disturbances and clearing
@@ -69,7 +69,7 @@ With `clearMode = "angle"` the fault is cleared when the GFM load angle reaches 
 :header-rows: 1
 
 * - Family
-  - Event function $h(\mathbf x)$
+  - Event function $h(\bm x)$
   - Direction
   - Eligible from
   - Voltage after detection
@@ -125,7 +125,10 @@ For the SMIB GFMs the reference is $A_{ref}=1-(1-V_f)\,\operatorname{clip}\!\big
 All SMIB systems use one infinite bus behind a grid impedance set by the short-circuit ratio and the R/X ratio $\rho$ (on the unit base $S_b = 8100$ VA, $V_b = 1$):
 
 $$
-L_g=\frac{1}{\mathrm{SCR}\sqrt{1+\rho^2}},\qquad R_g=\rho\,L_g,\qquad |R_g+jL_g|=\frac{1}{\mathrm{SCR}} .
+\begin{aligned}
+L_g &= \frac{1}{\mathrm{SCR}\sqrt{1+\rho^2}},\qquad R_g=\rho\,L_g\\
+|R_g+jL_g| &= \frac{1}{\mathrm{SCR}}
+\end{aligned}
 $$
 
 Depending on the unit, the grid impedance is either a network branch (`SMIB__SG`, whose terminal capacitor is a voltage port) or embedded in the unit (the unit is a current port and the network is a single bus with no branches).
@@ -181,7 +184,7 @@ bus 1 "Infinite bus":  Infbus (V-port)  +  GFM_A_C_L (I-port, embeds Rg + jLg)
   - run length and output step
 :::
 
-Solver: RK45, rtol 1e-3, atol 1e-5, maximum step $5\times10^{-3}/\omega_b$. The reported PCC voltage is the reconstructed $\mathbf v_{pcc}=\mathbf d+L_g\dot{\mathbf i}$ of the device.
+Solver: RK45, rtol 1e-3, atol 1e-5, maximum step $5\times10^{-3}/\omega_b$. The reported PCC voltage is the reconstructed $\bm v_{pcc}=\bm d+L_g\dot{\bm i}$ of the device.
 
 (sys-smib-gfl-l)=
 ### 2.2 SMIB\_\_GFL\_C\_F\_L
