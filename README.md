@@ -59,17 +59,23 @@ Then you should see the codesim dialog in the VS Code sidebar. If not, right cli
 Open the Command Palette (The textarea on the top of VSCode) and run:
 
 - **Python: Select Interpreter** to choose the Python environment CodeSim will use.
-- **CodeSim: Select Backend** and choose **Installed package (pip)** to use the `codesimpy` installed in step 1, or **Source checkout…** to select a cloned `codesimpy` folder (keep the folder name `codesimpy`) or a folder that contains it. You can also click the backend path shown next to the 'Start python backend' button in the CodeSim sidebar.
+- **CodeSim: Select Backend** to choose which `codesimpy` the backend runs:
+  - **Installed package (pip)**: the `codesimpy` installed in step 1. The list shows where it is installed in the selected interpreter; if it is missing there, you are offered to select another interpreter.
+  - **Source checkout…**: a cloned `codesimpy` folder (keep the folder name `codesimpy`) or a folder that contains it.
+  - **Automatic**: a `codesimpy` checkout in the open workspace if there is one, otherwise the installed package.
+- **CodeSim: Select User Workspace Folder** to choose the folder scanned for your own `@system` classes (default: the first folder open in VS Code).
+
+Both are also in the CodeSim sidebar, next to the 'Start python backend' button: click the backend path to change the backend, and the folder icon (followed by the user workspace path) to change the user workspace.
 
 CodeSim does not keep a separate Python executable setting. Each time the backend starts, it uses the active interpreter from the Microsoft Python extension for the current workspace. To switch environments, stop the CodeSim backend, run **Python: Select Interpreter**, choose the new environment, and start the backend again.
 
-The only CodeSim path setting is:
+The commands above write these settings, which can also be edited directly:
 
-```json
-{
-  "codesim-frontend.backendPath": "C:\\path\\to\\codesimpy"
-}
-```
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `codesim-frontend.backendPath` | empty | Source checkout containing `codesimpy`. Empty checks the open workspace folders, then the installed package. |
+| `codesim-frontend.useInstalledBackend` | `false` | Always use the pip-installed `codesimpy`, ignoring `backendPath` and workspace checkouts. |
+| `codesim-frontend.userWorkspace` | empty | Folder scanned for user `@system` classes. Empty uses the first workspace folder. |
 
 Click 'Start python backend' icon, if successful, the button will turn green. Then you should see the example systems in the dropdown list.
 
@@ -139,33 +145,24 @@ python -m unittest discover -s codesimpy/tests -t .
 
 ## Extending CodeSim
 
-### Add a system
+See the [model-building guide](docs/guide.md). It walks through writing a component (`Device`) and a system (`System`) step by step, and how to run it.
 
-1. Add a `System` subclass under `systems/`.
-2. Define its devices, network, base values, references, parameters, and parameter names.
-3. Implement `calculateSignals(time_s, state, networkSignals)`.
-4. Export it from `systems/__init__.py`.
-5. Add `defaultParameters(overrides=None)` to the system class and expose it through the backend service.
-6. Add a focused test under `tests/`.
-
-### Add a component
-
-Subclass `codesimpy.core.Device` and implement:
-
-| Method | Purpose |
-| --- | --- |
-| `getStateAndOutputEquationsSym` | Return symbolic state equations and port outputs |
-| `getPowerFlowEquations` | Return power-flow constraints |
-| `initFromPowerFlow` | Construct the initial device state |
-| `getFInit` | Return residual equations used during initialization |
-
-Export the class from `components/__init__.py` and instantiate it in a system. Add a `deviceAppearance` mapping only when the frontend needs a dedicated category or icon.
-
-## Current limitations
+## Current limitations and Roadmap
 
 - Three-phase unbalanced systems have not yet been validated.
 - Detailed switching models and switching events are not supported.
 - The project is a research-oriented model library rather than a replacement for switching-level EMT tools.
+- The network has RL branches only: no transformers (tap or phase shift), switches, or mutual coupling yet.
+
+Planned work, roughly in this order:
+
+1. **Network building blocks**: a network builder, transformers, switches and switching schedules, impedance loads and grid equivalents. These unlock the balanced CIGRE TB 575 benchmarks.
+2. **Impedance scanner**: an analytical subsystem impedance at any cut (built on the small-signal analyzer), and a numerical EMT frequency sweep to validate it.
+3. **Static voltage stability**: PV curves by continuation power flow, QV curves, device limits and modal analysis.
+4. **GPU EMT engine**: batch (ensemble) simulation on CUDA GPUs, generated from the existing symbolic model.
+5. **More benchmarks**: a standard-parameter synchronous generator, then the TB 575 HV transmission, resource-side and MV islanding benchmarks.
+6. **Unbalanced systems**: a three-phase (αβ0) network, then an arbitrary conductor count per node with unbalanced power flow, then the NA MV and LV benchmarks.
+7. **Intra-model GPU parallelism** for large networks.
 
 ## License and policies
 
