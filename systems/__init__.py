@@ -17,3 +17,14 @@ __all__ = [
     "CIGRE4__GFM_A_C_LC__GFL_C_F_L",
     "CIGRE14__GFM_A_C_LC__GFL_C_F_L",
 ]
+
+# Netlist systems: one NetlistSystem class per .cir file here, named after the file.
+from pathlib import Path as _Path
+
+from ..core import NetlistSystem as _NetlistSystem
+
+for _netlist in sorted(_Path(__file__).parent.glob("*.cir")):
+    globals()[_netlist.stem] = type(_netlist.stem, (_NetlistSystem,), {"__module__": __name__},
+                                    netlistFile=str(_netlist))
+    globals()[_netlist.stem].__doc__ = globals()[_netlist.stem]._title
+    __all__.append(_netlist.stem)

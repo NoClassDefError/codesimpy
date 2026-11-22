@@ -705,6 +705,8 @@ class OutputJsonFactory:
                     owner, ownerKind, 
                     f"{label}-{ownerName}", unit, time, matrix[:, column],
                 ))
+        for name, series in values.get("probes", {}).items():  # netlist .probe outputs
+            signals.append(self.makeSignal(systemId, "system", str(name), "", time, series))
         if "state" in simulation:
             state = np.asarray(simulation["state"])
             stateNames = list(map(str, simulation.get("stateNames", self.system.stateNames)))

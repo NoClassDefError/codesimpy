@@ -145,7 +145,7 @@ python -m unittest discover -s codesimpy/tests -t .
 
 ## Extending CodeSim
 
-See the [model-building guide](docs/guide.md). It walks through writing a component (`Device`) and a system (`System`) step by step, and how to run it.
+See the [model-building guide](docs/guide.md). It walks through writing a component (`Device`) and a system (`System`) step by step, and how to run it. A system can also be a SPICE netlist (`.cir`) instead of Python code; see [Systems from a netlist](docs/guide.md#guide-netlist).
 
 ## Current limitations and Roadmap
 

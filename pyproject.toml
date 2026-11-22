@@ -40,3 +40,6 @@ packages = [
     "codesimpy.core",
     "codesimpy.systems",
 ]
+
+[tool.setuptools.package-data]
+"codesimpy.systems" = ["*.cir"]

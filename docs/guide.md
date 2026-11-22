@@ -999,8 +999,85 @@ class SMIB__GFM_A_C_L(System):
 ```
 ::::
 
+(guide-netlist)=
+## 5. Systems from a netlist
+
+Instead of writing a `System` class you can describe the study as a SPICE netlist (`.cir`). `NetlistSystem` builds the network, devices, references, the state-triggered event and the output signals from it. Every `.cir` file in the user workspace appears in VS Code like an `@system` class (id: the file name, label: the title line). Built-in netlists live in `systems/` and become systems named after the file; [systems/CIGRE14_NL__GFM_A_C_LC__GFL_C_F_L.cir](../systems/CIGRE14_NL__GFM_A_C_LC__GFL_C_F_L.cir) is a complete example.
+
+```
+SMIB with a GFL                                   <- line 1 is always the title
+.options sbase=8100 freq=50 units=pu
+.param SCR=2 rho=0.25 Pref=1 Qref=-0.1 faultVoltage=0.5
+Xgrid pcc 0 Infbus kA=100 Aref=PWL(0 1 0.3 1 0.301 {faultVoltage} 0.6 {faultVoltage} 0.601 1)
+Xgfl  pcc 0 GFL_C_F_L KpPll=0.2 KiPll=0.2
++ Lg={1/(SCR*sqrt(1+rho^2))} Rg={rho/(SCR*sqrt(1+rho^2))} Idref={Pref} Iqref={-Qref}
+.tran 0.1m 1
+.probe tran Igfl=par('hypot(@xgfl[id], @xgfl[iq])') V=vm(pcc)
+.end
+```
+
+**Standard SPICE.** `*` comment lines, `;` and ` $ ` inline comments, `+` continuation; cards, names, nodes and parameters are case-insensitive; ground is `0` (`gnd`); suffixes `f p n u m k meg g t` with trailing unit letters ignored. A trailing `F` alone is *femto*, as in every SPICE: write `0.13u` or `0.13uF`, never `1.3e-7F`. Expressions go in `{...}` or `'...'`.
+
+:::{list-table}
+:header-rows: 1
+
+* - Card
+  - Meaning
+* - `Rname n1 n2 value`, `Lname n1 n2 value`
+  - Series branch (Ω, H). One R and one L on the same node pair form one RL branch; an R and an L in series through a node without devices are merged by Kron reduction. Every final branch needs an inductance.
+* - `Cname n 0 value`
+  - Shunt capacitor (F); becomes the bus's `Capacitor` voltage port.
+* - `Xname n+ 0 Model par=val ...`
+  - A device between bus `n+` and ground. `Model` is a class of `codesimpy.components`, a `@device` class, or a dotted `module.Class`. Parameters: `Sb`, `Vb` (default: system base), any entry of the device's `p`, and every reference (`uref` name without the index suffix; required). References can be `PWL(t1 v1 t2 v2 ...)`.
+* - `.param name=value ...`
+  - Parameters; editable in the frontend.
+* - `.include file`, `.end`, `.title`
+  - Insert netlist text; end of netlist; title.
+* - `.tran tstep tstop [tstart [tmax]]`
+  - Output step, end time and maximum solver step (`tstart` must be 0).
+* - `.options reltol= abstol= method=`
+  - Solver tolerances and method (`dop853`, `rk45`, `radau`, `bdf`/`gear`, ...).
+* - `.meas tran name WHEN expr=value RISE=1|FALL=1|CROSS=1 [FROM=t]`
+  - The state-triggered event, detected at the first crossing after `FROM`.
+* - `.probe tran name=par('expr') ...`
+  - Extra output signals, shown in the frontend.
+:::
+
+In `.meas` and `.probe` expressions: `V(n)` (α-axis instantaneous), `VM(n)`, `VP(n)` (rad, relative to the reference bus), `I(Rname|Lname)`, `IM(...)`, device states `@xname[state]` and `time`.
+
+**CodeSim extensions.**
+
+:::{list-table}
+:header-rows: 1
+
+* - Extension
+  - Meaning
+* - `.options sbase= vbase= freq= residualtol= units=si|pu`
+  - System base (VA, line-line V, Hz), initialization tolerance, and the unit of R/L/C values. `units=pu`: values are per unit on the system base (L and C as reactance and susceptance), so per-unit tables paste as they are.
+* - `.hdl file.py`
+  - Imports a Python file so that its `@device` classes can be used as `X` models.
+* - `{name}` of the `.meas` card
+  - The detected event time (`inf` until it fires), usable as a PWL time: knots not reached yet are ignored, so the waveform holds until the event. Example (clear the fault when the GFM angle enters (-π/3, 0)): `Aref=PWL(0 1 0.2 1 0.2 0 {clear} 0 {clear} 1)` with `.meas tran clear WHEN min(wrap(@xvsg[delta])+pi/3, -wrap(@xvsg[delta]))=0 RISE=1 FROM=0.25`.
+* - `P(n)`, `Q(n)`, `wrap(x)`
+  - Bus active/reactive power injection; angle wrapped to (-π, π].
+:::
+
+A bus takes at most one voltage-port and one current-port device. A bus with only a voltage-port device gets a `ZeroCurrent`; a current-port device needs a `C` or a voltage-port device on its bus. Errors name the file and line.
+
+**User components.** Mark a component with `@device` so a netlist can use it by name:
+
+```python
+from codesimpy import Device, device
+
+@device                    # or @device(name="MyGFM")
+class MyGFM(Device):
+    ...
+```
+
+A `.cir` file needs no Python class: it is a system by itself. Only if a netlist is not enough, write an `@system` class `class MyStudy(NetlistSystem, netlistFile="study.cir")` (path relative to the Python file) that overrides `calculateSignals` or `eventHandler`.
+
 (guide-run)=
-## 5. Run it
+## 6. Run it
 
 ### In VS Code
 
@@ -1036,7 +1113,7 @@ print(rms["differentialStateNames"])   # thetas + rmsDynamicIndices
 ```
 
 (guide-troubleshooting)=
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 :::{list-table}
 :header-rows: 1

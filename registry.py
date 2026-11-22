@@ -9,9 +9,11 @@ Users mark a system class with :func:`system`::
     class MySMIB(SMIB__GFL_C_F_L):
         ...
 
-:func:`discover` imports the decorated files of a workspace folder and returns
-a :class:`Registry`. Components need no registration: they are plain
-:class:`~codesimpy.core.Device` subclasses that a system creates itself.
+:func:`discover` imports the decorated files of a workspace folder, loads its
+``.cir`` netlists as :class:`~codesimpy.core.NetlistSystem` classes and returns
+a :class:`Registry`. Components a Python system creates itself need no
+registration; user components used by a netlist ``X`` line are marked with
+:func:`device` (built-in components are found by their class name).
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ except ModuleNotFoundError:  # Python < 3.11
 T = TypeVar("T", bound=type)
 
 _ATTR = "__codesim__"
+_DEVICE_ATTR = "__codesim_device__"
+#: ``@device`` classes by lower-case name: the models a netlist ``X`` line can use.
+DEVICES: dict[str, type] = {}
 USER_MODULE_PREFIX = "codesimpy_user"
 _SKIPPED_DIRECTORIES = {
     ".git", ".hg", ".svn", ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache",
@@ -96,6 +101,37 @@ def system(cls=None, /, *, id=None, label=None, category="", description=None):
     return apply(cls) if cls is not None else apply
 
 
+def device(cls=None, /, *, name=None):
+    """Mark a :class:`~codesimpy.core.Device` subclass as a netlist model.
+
+    Use it bare (``@device``) or with a name (``@device(name="MyGFM")``); the
+    name defaults to the class name and is matched case-insensitively by the
+    model field of a netlist ``X`` line.
+    """
+    def apply(target):
+        from .core import Device
+
+        if not (isinstance(target, type) and issubclass(target, Device)):
+            raise TypeError(f"@device must decorate a Device subclass, got {target!r}")
+        if inspect.isabstract(target):
+            missing = ", ".join(sorted(target.__abstractmethods__))
+            raise TypeError(f"@device {target.__name__} is abstract; implement: {missing}")
+        deviceName = name or target.__name__
+        existing = DEVICES.get(deviceName.lower())
+        if existing is not None and (existing.__module__, existing.__qualname__) != (
+            target.__module__, target.__qualname__,
+        ):
+            raise ValueError(
+                f"device name {deviceName!r} is already used by "
+                f"{existing.__module__}.{existing.__qualname__}"
+            )
+        setattr(target, _DEVICE_ATTR, deviceName)
+        DEVICES[deviceName.lower()] = target
+        return target
+
+    return apply(cls) if cls is not None else apply
+
+
 def meta_of(cls: type) -> Meta | None:
     """The class's own ``@system`` metadata; subclasses do not inherit registration."""
     return cls.__dict__.get(_ATTR)
@@ -142,7 +178,7 @@ class Registry:
 
 
 def _uses_system_decorator(path: Path) -> bool:
-    """True when the file defines a class decorated with ``system`` (parsed, never run)."""
+    """True when the file defines a class decorated with ``system`` or ``device`` (parsed, never run)."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
     except (SyntaxError, UnicodeDecodeError, ValueError):
@@ -160,7 +196,7 @@ def _uses_system_decorator(path: Path) -> bool:
                 name = target.id
             else:
                 continue
-            if name == "system":
+            if name in ("system", "device"):
                 return True
     return False
 
@@ -174,20 +210,21 @@ def _workspace_config(workspace: Path) -> dict[str, Any]:
 
 
 def find_user_files(workspace: str | Path) -> list[Path]:
-    """Files to import: ``[tool.codesim] systems`` globs, else every file using ``@system``."""
+    """Files to load: ``[tool.codesim] systems`` globs, else every ``.cir`` netlist and
+    every ``.py`` file using ``@system`` or ``@device``."""
     root = Path(workspace).resolve()
     config = _workspace_config(root)
     patterns = config.get("systems")
     if patterns:
         files = {path.resolve() for pattern in patterns for path in root.glob(pattern) if path.is_file()}
         files -= {path.resolve() for pattern in config.get("exclude", []) for path in root.glob(pattern)}
-        return sorted(path for path in files if path.suffix == ".py")
+        return sorted(path for path in files if path.suffix in (".py", ".cir"))
     found = []
-    for path in root.rglob("*.py"):
+    for path in [*root.rglob("*.py"), *root.rglob("*.cir")]:
         parts = path.relative_to(root).parts
         if any(part in _SKIPPED_DIRECTORIES or part.startswith(".") for part in parts[:-1]):
             continue
-        if _uses_system_decorator(path):
+        if path.suffix == ".cir" or _uses_system_decorator(path):
             found.append(path.resolve())
     return sorted(found)
 
@@ -237,7 +274,7 @@ def _builtin_entries():
 
 
 def discover(workspace: str | Path | None = None) -> Registry:
-    """Built-in systems, plus the ``@system`` classes found in ``workspace``."""
+    """Built-in systems, plus the ``@system`` classes and ``.cir`` netlists found in ``workspace``."""
     registry = Registry()
     for entry in _builtin_entries():
         registry.add(entry)
@@ -254,7 +291,22 @@ def discover(workspace: str | Path | None = None) -> Registry:
     except Exception as error:  # e.g. malformed pyproject.toml
         registry.errors.append(_error(root / "pyproject.toml", error))
         return registry
-    for path in files:
+    # Python files first: they register the user @device models that netlists use.
+    for path in sorted(files, key=lambda path: path.suffix == ".cir"):
+        if path.suffix == ".cir":
+            try:
+                from .core import NetlistSystem
+
+                cls = type(path.stem, (NetlistSystem,), {}, netlistFile=str(path))
+                system(id=path.stem, label=cls._title or path.stem, category="Netlist",
+                       description=cls._title)(cls)
+                registry.add(SystemEntry(
+                    id=path.stem, cls=cls, source="workspace", label=cls._title or path.stem,
+                    category="Netlist", description=cls._title, file=str(path), line=1,
+                ))
+            except Exception as error:
+                registry.errors.append(_error(path, error))
+            continue
         try:
             module = import_user_file(path, root)
             for obj in list(vars(module).values()):

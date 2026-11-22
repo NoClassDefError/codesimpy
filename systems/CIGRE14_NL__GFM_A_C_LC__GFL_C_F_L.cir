@@ -1,0 +1,92 @@
+CIGRE14 (netlist) · GFM_A_C_LC at bus 9 + GFL_C_F_L at bus 7, fault cleared when the GFM angle enters (-pi/3, 0)
+* Full CIGRE MV benchmark feeder, per unit on 25 MVA / 20 kV. Line charging is lumped as
+* half the line capacitance at each end bus; loads are series RL branches to ground.
+* Card order fixes the bus order (source, 1..11, ground) and the branch order (lines, loads).
+.options sbase=25meg vbase=20k freq=50 units=pu method=dop853 reltol=1e-3 abstol=1e-5 residualtol=1e-4
+* Time mode (clearMode = "time"): the fault is cleared at a fixed time.
+* .param faultStart_s=0.10 faultComplete_s=0.101 recoveryStart_s=0.25 recoveryComplete_s=0.2501 faultVoltage=0.1
+* Angle mode (clearMode = "angle"): a bolted fault at faultStart_s, cleared when the GFM angle enters
+* (angleClearLower_rad, angleClearUpper_rad), not before angleClearEligible_s. faultComplete_s,
+* recoveryStart_s and recoveryComplete_s are only used by the time mode.
+.param faultStart_s=0.20 faultComplete_s=0.201 recoveryStart_s=0.25 recoveryComplete_s=0.2501 faultVoltage=0
++ angleClearEligible_s=0.25 angleClearLower_rad={-pi/3} angleClearUpper_rad=0
++ GFLPref=1 GFLQref=0 VSGPref=1 VSGVref=1.1 VSGwref=1
+
+* Upstream grid: infinite bus with the fault voltage profile
+Xsource source 0 Infbus kA=100
+* Time mode: ramp down at faultStart_s..faultComplete_s, back up at recoveryStart_s..recoveryComplete_s.
+* + Aref=PWL(0 1 {faultStart_s} 1 {faultComplete_s} {faultVoltage} {recoveryStart_s} {faultVoltage} {recoveryComplete_s} 1 1 1)
+* Angle mode: step down at faultStart_s, step back up at the detected clearing time {faultClearing}
+* (inf until the .meas event below fires, so the fault holds until then).
++ Aref=PWL(0 1 {faultStart_s} 1 {faultStart_s} {faultVoltage} {faultClearing} {faultVoltage} {faultClearing} 1)
+
+* Bus line-charging capacitances (bus 9: inside the GFM as its C)
+C1 1 0 0.00107144208
+C2 2 0 0.0027507945600000003
+C3 3 0 0.0024050455200000003
+C4 4 0 0.00044453448
+C5 5 0 0.0007978823999999999
+C6 6 0 0.00058511376
+C7 7 0 0.00063450648
+* GFL current references on its own base: Iqref = -GFLQref, so Q = V * GFLQref
+Xgfl 7 0 GFL_C_F_L Sb=1.5meg L=0.07 Kpcc=0.3 Kicc=1 KpPll=0.2 KiPll=0.02
++ Idref={GFLPref} Iqref={-GFLQref}
+C8 8 0 0.00125001576
+Xvsg 9 0 GFM_A_C_LC Sb=5meg Lv=0.3 Rv=0.1 Lf=0.07 Imax=1.5 Kp=0.05 Kp_cc=20 Ki_cc=5
++ C=0.0020706947999999995 Pref={VSGPref} Vref={VSGVref} wref={VSGwref}
+C10 10 0 0.0004179384
+C11 11 0 0.00012538152
+
+* Lines
+RS_1 source 1 0.0014975185951049946
+LS_1 source 1 0.12497518595104994
+R1_2 1 2 0.08830125
+L1_2 1 2 0.126195
+R2_3 2 3 0.13840125
+L2_3 2 3 0.197795
+R3_4 3 4 0.019100625
+L3_4 3 4 0.0272975
+R3_8 3 8 0.04070625
+L3_8 3 8 0.058175
+R4_5 4 5 0.017535
+L4_5 4 5 0.02506
+R5_6 5 6 0.04822125
+L5_6 5 6 0.068915
+R7_8 7 8 0.052291875
+L7_8 7 8 0.0747325
+R8_9 8 9 0.01002
+L8_9 8 9 0.01432
+R9_10 9 10 0.024110625
+L9_10 9 10 0.0344575
+R10_11 10 11 0.010333125
+L10_11 10 11 0.0147675
+
+* Loads (to ground)
+Rload1 1 0 1.1948643729138855
+Lload1 1 0 0.2792856824980968
+Rload3 3 0 42.468763552332916
+Lload3 3 0 17.68182891890171
+Rload4 4 0 54.49438202247191
+Lload4 4 0 13.657579529374406
+Rload5 5 0 32.33333333333333
+Lload5 5 0 8.103497187428813
+Rload6 6 0 42.92035398230088
+Lload6 6 0 10.75685467357807
+Rload7 7 0 236.11111111111111
+Lload7 7 0 146.32852434517696
+Rload8 8 0 40.08264462809917
+Lload8 8 0 10.0456576703663
+Rload9 9 0 31.481481481481477
+Lload9 9 0 19.510469912690258
+Rload10 10 0 42.28924202649502
+Lload10 10 0 12.55242651758491
+Rload11 11 0 71.3235294117647
+Lload11 11 0 17.875361442857677
+
+.tran 0.1m 1
+* Angle mode: clearing event. min(...) > 0 inside the window, so the event fires on entering it.
+* Time mode: delete this card.
+.meas tran faultClearing WHEN min(wrap(@xvsg[delta])-angleClearLower_rad, angleClearUpper_rad-wrap(@xvsg[delta]))=0
++ RISE=1 FROM={angleClearEligible_s}
+.probe tran delta=par('wrap(@xvsg[delta])') filterCurrentMagnitude=par('hypot(@xvsg[ild], @xvsg[ilq])')
+.end
