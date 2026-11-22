@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Callable, Mapping
+import threading
 from time import perf_counter
 from typing import Any
 
@@ -12,6 +13,7 @@ import sympy as sp
 from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares, root
 
+from .device import Device
 from .rl_grid import RLGrid
 from .small_signal_analyzer import SmallSignalAnalyzer
 from .transient_voltage_analyzer import TransientVoltageAnalyzer
@@ -23,6 +25,10 @@ class System(ABC):
     Public time values are seconds; ``RLGrid`` equations use normalized time
     ``tau = wBase * t``. Python dictionaries replace MATLAB structs/maps/tables.
     """
+
+    #: Set (e.g. by the CLI on a stop request) to end a running :meth:`simulate` or
+    #: :meth:`simulateRMS` early; the result then ends at the last finished sample.
+    stopRequest = threading.Event()
 
     def __init__(
         self, name: str, network: Mapping[str, Any], devices: Mapping[str, Any],
@@ -50,11 +56,15 @@ class System(ABC):
         self.eventDirection = 0.0  # -1: falling, 0: either, +1: rising crossing.
         self.eventName = "event"  # Label recorded in the simulation result.
         self.eventTime_s = np.inf  # Exact detected time; inf means not triggered.
+        # Output signals (calculateSignals): angle reference bus (retained-bus index; None:
+        # the first infinite bus) and extra system-level signals {name: f(time_s, state, net)}.
+        self.referenceBusIndex: int | None = None
+        self.probes: dict[str, Callable[[Any, Any, dict[str, Any]], Any]] = {}
         self.retainedNodeIndices = [i for i, device in enumerate(Vdev) if device is not None]
         self.busNames = [str(busNames[i]) for i in self.retainedNodeIndices]
         self.rlGrid = RLGrid(
             A, L, R, self.base["Vbase"], self.base["Sbase"],
-            Vdev, Idev, self.name,
+            Vdev, Idev, self.name, busNames,
         )
         self.referenceNames = [str(symbol) for symbol in self.rlGrid.u]
         self.stateNames = [str(symbol) for symbol in self.rlGrid.x]
@@ -63,7 +73,9 @@ class System(ABC):
         self.smallSignal = SmallSignalAnalyzer(self)
         self.transientVoltage = TransientVoltageAnalyzer(self)
         from ..api.output_json_factory import OutputJsonFactory
-        self.outputJsonFactory = OutputJsonFactory(self)
+        from ..api.output_mat_factory import OutputMatFactory
+        self.outputJsonFactory = OutputJsonFactory(self)  # JSON interface to the extension
+        self.outputMatFactory = OutputMatFactory(self)  # MAT data log of the results
 
     def setReference(self, name: str, value: float | Callable[[float], float]) -> None:
         self.referenceMap[name] = value
@@ -92,8 +104,11 @@ class System(ABC):
         powerFlow = info.get("powerFlow")
         if powerFlow and (powerFlow["exitflag"] <= 0 or powerFlow["residualInfNorm"] >= ResidualTolerance):
             raise RuntimeError("power-flow initialization failed")
+        state = np.real(state).reshape(-1)
+        theta = self.rlGrid.angleStateIndices
+        state[theta] = (state[theta] + np.pi) % (2 * np.pi) - np.pi  # angles in [-pi, pi)
         return {
-            "state": np.real(state).reshape(-1), "reference": np.asarray(reference).reshape(-1),
+            "state": state, "reference": np.asarray(reference).reshape(-1),
             "time_s": float(time_s), "initialization": info,
         }
 
@@ -107,6 +122,9 @@ class System(ABC):
         ``branchIndex`` remains one-based to match existing CodeSim models.
         """
         started = perf_counter()
+        if self.rlGrid.attached:
+            raise NotImplementedError("scanPQ does not support several current devices on a bus "
+                                      "or current devices on a bus without a voltage device")
         A = np.asarray(self.network["A"], dtype=float)
         branch = int(branchIndex) - 1
         voltage_pu = np.asarray(voltage_pu, dtype=float).reshape(-1)
@@ -258,7 +276,7 @@ class System(ABC):
         if self.eventName == "faultClearing":
             result["clearingTime_s"] = self.eventTime_s
         if saveSnapshot:
-            _, result["frontendDescriptor"] = self.outputJsonFactory.saveSnapshot(result)
+            _, result["frontendDescriptor"] = self.outputMatFactory.saveSnapshot(result)
         return result
 
     def integrate(
@@ -266,7 +284,11 @@ class System(ABC):
         solverSettings: Mapping[str, Any], breakpoints_s: Any = (),
     ):
         time_s = np.asarray(time_s, dtype=float).reshape(-1)
-        initialState = np.asarray(initialState, dtype=float).reshape(-1)
+        initialState = np.asarray(initialState, dtype=float).reshape(-1).copy()
+        # The model is 2*pi-periodic in the angle states: keep them in [-pi, pi) at every
+        # restart of the solver and in the stored samples (never inside a solver step).
+        theta = self.rlGrid.angleStateIndices
+        initialState[theta] = (initialState[theta] + np.pi) % (2 * np.pi) - np.pi
         breakpoints = np.unique(np.asarray(breakpoints_s, dtype=float).reshape(-1))
         breakpoints = breakpoints[
             np.isfinite(breakpoints)
@@ -280,6 +302,8 @@ class System(ABC):
         wBase = 2 * np.pi * self.base["frequency_Hz"]
 
         def derivative(t: float, value: np.ndarray) -> np.ndarray:
+            if self.stopRequest.is_set():
+                raise InterruptedError
             reference = self.getReference(t, references)
             return wBase * np.asarray(
                 self.rlGrid.f_numeric(value, reference), dtype=float
@@ -314,6 +338,8 @@ class System(ABC):
         nextOutput = 1
 
         for boundary in boundaries:
+            if self.stopRequest.is_set():
+                break
             while currentTime < boundary:
                 eventActive = (
                     eventPending and self.eventStartTime_s <= currentTime
@@ -325,10 +351,13 @@ class System(ABC):
                     scipyEvent.terminal = True
                     scipyEvent.direction = self.eventDirection
 
-                solution = solve_ivp(
-                    derivative, (currentTime, float(boundary)), currentState,
-                    dense_output=True, events=scipyEvent, **solverSettings,
-                )
+                try:
+                    solution = solve_ivp(
+                        derivative, (currentTime, float(boundary)), currentState,
+                        dense_output=True, events=scipyEvent, **solverSettings,
+                    )
+                except InterruptedError:  # stopRequest: keep the samples finished so far
+                    break
                 if not solution.success:
                     raise RuntimeError(
                         f"simulation integration failed at {solution.t[-1]:.9g} s: "
@@ -340,17 +369,21 @@ class System(ABC):
                     )
 
                 currentTime = float(solution.t[-1])
-                currentState = solution.y[:, -1]
+                currentState = solution.y[:, -1].copy()
+                currentState[theta] = (currentState[theta] + np.pi) % (2 * np.pi) - np.pi
                 stopOutput = int(np.searchsorted(time_s, currentTime, side="right"))
                 if stopOutput > nextOutput:
                     targets = time_s[nextOutput:stopOutput]
-                    state[nextOutput:stopOutput] = solution.sol(targets).T
+                    samples = solution.sol(targets).T
+                    samples[:, theta] = (samples[:, theta] + np.pi) % (2 * np.pi) - np.pi
+                    state[nextOutput:stopOutput] = samples
                     nextOutput = stopOutput
 
                 if not eventActive or not solution.t_events[0].size:
                     break
                 currentTime = float(solution.t_events[0][0])
-                currentState = solution.y_events[0][0]
+                currentState = solution.y_events[0][0].copy()
+                currentState[theta] = (currentState[theta] + np.pi) % (2 * np.pi) - np.pi
                 self.eventTime_s = currentTime
                 eventPending = False
                 events["name"].append(self.eventName)
@@ -363,6 +396,8 @@ class System(ABC):
                     emitChunk(chunkStart, chunkStart + chunkSize)
                     chunkStart += chunkSize
 
+        if self.stopRequest.is_set():
+            time_s, state = time_s[:nextOutput], state[:nextOutput]
         if self.outputJsonFactory.streaming and chunkStart < time_s.size:
             emitChunk(chunkStart, time_s.size)
         return state, time_s, events
@@ -467,6 +502,8 @@ class System(ABC):
             return state, reference
 
         def derivative(t, xd):
+            if self.stopRequest.is_set():
+                raise InterruptedError
             state, reference = fullState(t, xd)
             return wBase * rms["F"](state, reference)[d]
 
@@ -494,19 +531,28 @@ class System(ABC):
                 self.calculateSignals(chunkTime, chunkState, networkSignals),
             )
 
+        theta = self.rlGrid.angleStateIndices
+        thetaInDifferential = np.flatnonzero(np.isin(d, theta))
         for start, stop in zip(boundaries[:-1], boundaries[1:]):
-            solution = solve_ivp(derivative, (start, stop), xd, dense_output=True, **settings)
+            xd[thetaInDifferential] = (xd[thetaInDifferential] + np.pi) % (2 * np.pi) - np.pi
+            try:
+                solution = solve_ivp(derivative, (start, stop), xd, dense_output=True, **settings)
+            except InterruptedError:  # stopRequest: keep the samples finished so far
+                time_s, state, residualNorm = time_s[:nextOutput], state[:nextOutput], residualNorm[:nextOutput]
+                break
             if not solution.success:
                 raise RuntimeError(f"RMS integration failed at {solution.t[-1]:.9g} s: {solution.message}")
-            xd = solution.y[:, -1]
+            xd = solution.y[:, -1].copy()
             inside = np.flatnonzero((time_s >= start) & (time_s <= stop))
             last["xa"] = state[inside[0] - 1, a] if inside.size and inside[0] > 0 else last["xa"]
             for k in inside:
                 sample, reference = fullState(time_s[k], solution.sol(time_s[k]))
+                sample[theta] = (sample[theta] + np.pi) % (2 * np.pi) - np.pi
                 state[k] = sample
                 residualNorm[k] = np.linalg.norm(rms["F"](sample, reference)[a], np.inf)
-            if streaming and inside.size:
+            if inside.size:
                 nextOutput = max(nextOutput, int(inside[-1]) + 1)
+            if streaming:
                 while nextOutput - chunkStart >= chunkSize:
                     emitChunk(chunkStart, chunkStart + chunkSize)
                     chunkStart += chunkSize
@@ -649,13 +695,16 @@ class System(ABC):
         voltage = np.zeros((sampleCount, grid.n), complex)
         branch = np.zeros((sampleCount, grid.b), complex)
         current = np.zeros((sampleCount, grid.n), complex)
+        floatingVoltage = np.zeros((sampleCount, len(grid.floatingNodes)), complex)
+        floatingBranch = np.zeros((sampleCount, len(grid.floatingColumns)), complex)
         referenceTrace = np.zeros((sampleCount, len(references)))
         for sampleIndex in range(sampleCount):
             referenceTrace[sampleIndex] = self.getReference(time_s[sampleIndex], references)
-            branchValue, voltageValue, currentValue = grid.g_numeric(state[sampleIndex], referenceTrace[sampleIndex])
-            branch[sampleIndex] = branchValue.reshape(-1, 2)[:, 0] + 1j * branchValue.reshape(-1, 2)[:, 1]
-            voltage[sampleIndex] = voltageValue.reshape(-1, 2)[:, 0] + 1j * voltageValue.reshape(-1, 2)[:, 1]
-            current[sampleIndex] = currentValue.reshape(-1, 2)[:, 0] + 1j * currentValue.reshape(-1, 2)[:, 1]
+            # g = [ib, vn, deviceCurrent, v_floating, i_floating], as complex pairs.
+            value = grid.g_core(state[sampleIndex], referenceTrace[sampleIndex])
+            value = value.reshape(-1, 2)[:, 0] + 1j * value.reshape(-1, 2)[:, 1]
+            stops = np.cumsum([grid.b, grid.n, grid.n, len(grid.floatingNodes)])
+            branch[sampleIndex], voltage[sampleIndex], current[sampleIndex],                 floatingVoltage[sampleIndex], floatingBranch[sampleIndex] = np.split(value, stops)
         injection = branch @ grid.A.T
         voltageDeviceCurrent = injection - current
         return {
@@ -665,6 +714,7 @@ class System(ABC):
             "busPower": voltage * np.conj(injection),
             "currentDevicePower": voltage * np.conj(current),
             "voltageDevicePower": voltage * np.conj(voltageDeviceCurrent),
+            "floatingVoltage": floatingVoltage, "floatingBranchCurrent": floatingBranch,
             "referenceTrace": referenceTrace,
         }
 
@@ -673,7 +723,7 @@ class System(ABC):
         voltage = networkSignals["busVoltage"][:, indices]
         power = networkSignals["busPower"][:, indices]
         relativeVoltage = voltage / networkSignals["busVoltage"][:, [referenceIndex]]
-        angleDegrees = np.rad2deg(np.unwrap(np.angle(relativeVoltage), axis=0))
+        angleDegrees = np.rad2deg(np.angle(relativeVoltage))  # wrapped to (-180, 180]
         names = [self.busNames[i] for i in indices]
         return {
             "busNames": names, "busVoltageMagnitude": np.abs(voltage),
@@ -687,6 +737,35 @@ class System(ABC):
             ],
         }
 
-    @abstractmethod
     def calculateSignals(self, time_s: Any, state: Any, networkSignals: dict[str, Any]):
-        """Return system-specific output signals."""
+        """Output signals of every system.
+
+        * :meth:`busSignals` of every retained bus (|V|, angle, P, Q, line currents),
+          angles relative to ``referenceBusIndex`` (default: the first infinite bus);
+        * ``devices``: ``{"Class-index": Device.calculateSignals(...)}`` for the devices
+          that compute signals of their own (device base);
+        * ``probes``: ``{name: f(time_s, state, networkSignals)}`` of ``self.probes``.
+        """
+        state, grid = np.asarray(state), self.rlGrid
+        reference = self.referenceBusIndex
+        if reference is None:
+            reference = next((i for i, device in enumerate(grid.Vdev) if type(device).__name__ == "Infbus"), 0)
+        signals = self.busSignals(networkSignals, np.arange(grid.n), reference)
+        # Port inputs per power-flow node: bus voltages (retained, then reduced buses)
+        # for current-port devices, voltage-device currents for voltage-port devices.
+        voltage = np.hstack((networkSignals["busVoltage"], networkSignals["floatingVoltage"]))
+        ordered = [item for i, (Vdev, Idev) in enumerate(zip(grid.Vdev, grid.Idev)) for item in ((Vdev, i), (Idev, i))]
+        for device, node in ordered + list(grid.attached):
+            if type(device).calculateSignals is Device.calculateSignals:
+                continue
+            port = networkSignals["voltageDeviceCurrent"][:, node] if device.type == "Voltage" else voltage[:, node]
+            columns = [self.referenceNames.index(str(symbol)) for symbol in device.uref]
+            extra = device.calculateSignals(
+                time_s, state[:, [self.stateNames.index(str(symbol)) for symbol in device.x]],
+                device.Inputscale * np.column_stack((port.real, port.imag)),
+                networkSignals["referenceTrace"][:, columns])
+            if extra:
+                signals.setdefault("devices", {})[f"{type(device).__name__}-{str(device.index).lstrip('_')}"] = extra
+        if self.probes:
+            signals["probes"] = {name: probe(time_s, state, networkSignals) for name, probe in self.probes.items()}
+        return signals

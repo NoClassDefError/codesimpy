@@ -23,6 +23,7 @@ def cseJacobian(
     variables: Sequence[sp.Symbol],
     *,
     prefix: str = "w",
+    intermediates: Replacements = (),
 ) -> tuple[Replacements, sp.ImmutableMatrix]:
     """Jacobian of ``expressions`` with respect to ``variables`` in CSE form.
 
@@ -32,6 +33,11 @@ def cseJacobian(
     the ``w_k``. Substituting the intermediates back in reverse order yields
     ``Matrix(expressions).jacobian(variables)``.
 
+    ``intermediates`` are ordered ``(symbol, expression)`` definitions of symbols
+    that ``expressions`` use (e.g. the reduced bus voltages of
+    ``RLGrid.localDAEreduction``); the chain rule goes through them and they
+    lead the returned replacements.
+
     The intermediates are real symbols. With complex symbols SymPy keeps
     ``d|w|/dw`` as an unevaluated ``Derivative``.
     """
@@ -39,9 +45,16 @@ def cseJacobian(
     variables = list(variables)
     if not rows:
         return [], sp.ImmutableMatrix(sp.zeros(0, len(variables)))
+    defined: Replacements = []
+    names = sp.numbered_symbols(f"{prefix}d", real=True)
+    for symbol, definition in intermediates:
+        # One definition at a time: a definition may use the symbols defined before it.
+        head, reducedDefinition = sp.cse([definition], symbols=names, optimizations="basic")
+        defined += head + [(symbol, reducedDefinition[0])]
     replacements, reduced = sp.cse(
         rows, symbols=sp.numbered_symbols(prefix, real=True), optimizations="basic",
     )
+    replacements = defined + replacements
     gradients: dict[sp.Symbol, sp.Matrix] = {}
 
     def gradient(expression: sp.Expr) -> sp.Matrix:

@@ -10,7 +10,10 @@ The format follows SPICE3 / ngspice / HSPICE wherever a standard card exists:
   ``'...'`` expressions use ``sqrt exp log sin cos tan atan atan2 abs min max
   pow hypot`` and ``pi``.
 * ``Rname n1 n2 value`` (ohm), ``Lname n1 n2 value`` (H), ``Cname n 0 value``
-  (F); ``Xname n+ 0 Model par=val ...`` instantiates a device; ``PWL(t1 v1 ...)``
+  (F); ``Lname n1 n2 value R=r`` (HSPICE) or ``Rname n1 n2 value L=l`` is one
+  series RL branch per card (parallel branches allowed); plain R and L cards on
+  the same node pair merge into one series branch; ``L = 0`` is allowed except
+  between two buses with voltage devices; ``Xname n+ 0 Model par=val ...`` instantiates a device; ``PWL(t1 v1 ...)``
   is a reference waveform; ``.include file`` inserts netlist text;
   ``.tran tstep tstop [tstart [tmax]]``; ``.options reltol= abstol= method=``.
 * ``.meas tran name WHEN expr=value RISE=1|FALL=1|CROSS=1 [FROM=t]`` is the
@@ -33,6 +36,9 @@ CodeSim extensions:
   event fires) and may be used as a PWL time; unreached knots are ignored, so
   the waveform holds its value until the event.
 * ``P(n)``, ``Q(n)``: bus power injection; ``wrap(x)``: angle in (-pi, pi].
+* A bus without a C or a voltage-port device (with or without current-port
+  devices) is removed by ``RLGrid.localDAEreduction``; a bus may hold several
+  current-port devices. ``V(n)``, ``P(n)`` and ``I(...)`` work on such buses.
 """
 
 from __future__ import annotations
@@ -46,7 +52,6 @@ from typing import Any
 import numpy as np
 
 from .device import Device
-from .rl_grid import RLGrid
 from .system import System
 
 _SUFFIXES = {"t": 1e12, "g": 1e9, "k": 1e3, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}
@@ -256,11 +261,18 @@ class NetlistSystem(System):
             elif card.startswith("."):
                 raise SyntaxError(f"unsupported card {positional[0]}", (file, number, 0, None))
             elif card[:1] in ("r", "l", "c"):
-                if len(positional) != 4 or pairs:
-                    raise SyntaxError(f"{positional[0]} expects: name node1 node2 value", (file, number, 0, None))
+                # HSPICE-style combined branch: L... R=r, or R... L=l.
+                series = {"l": "r", "r": "l"}.get(card[0])
+                if len(positional) != 4 or set(pairs) - {series}:
+                    usage = f" [{series.upper()}=value]" if series else ""
+                    raise SyntaxError(f"{positional[0]} expects: name node1 node2 value{usage}", (file, number, 0, None))
                 sources.append((positional[3], file, number))
-                elements.append({"kind": card[0], "name": positional[0], "nodes": positional[1:3],
-                                 "value": len(sources) - 1, "file": file, "line": number})
+                element = {"kind": card[0], "name": positional[0], "nodes": positional[1:3],
+                           "value": len(sources) - 1, "file": file, "line": number}
+                if series in pairs:
+                    sources.append((pairs[series][1], file, number))
+                    element["series"] = len(sources) - 1
+                elements.append(element)
             elif card[:1] == "x":
                 if positional[4:5] and positional[4].lower() == "params:":
                     positional = positional[:4] + positional[5:]
@@ -345,7 +357,7 @@ class NetlistSystem(System):
                 for module in list(sys.modules.values())
             )
             if not loaded:
-                registry.import_user_file(path, path.parent)
+                registry.Workspace(path.parent).importFile(path)
 
         cls._filename, cls._title, cls._options, cls._params = filename, title, options, params
         cls._tran, cls._elements, cls._meas, cls._probes, cls._codes = tran, elements, meas, probes, codes
@@ -441,29 +453,38 @@ class NetlistSystem(System):
                     busNames.append("ground" if node == "0" else raw)
         count = len(busNames)
 
-        # Branches: one R and one L per node pair, merged into one RL branch.
-        branches: dict[tuple[str, str], dict[str, Any]] = {}
+        # Branches: plain R and L cards on one node pair merge into one series RL branch;
+        # a combined card (L ... R=, R ... L=) is a branch of its own.
+        branches: dict[tuple[str, ...], dict[str, Any]] = {}
         capacitance, capacitorLine = np.zeros(count), [None] * count
-        voltageDevices, currentDevices = [None] * count, [None] * count
-        deviceLine = [None] * count
+        voltageDevices, currentDevices = [None] * count, [[] for _ in range(count)]
         references: dict[str, Any] = {}
         devices: dict[str, Any] = {}
         for element in cls._elements:
             kind, name, file, number = element["kind"], element["name"], element["file"], element["line"]
             if kind in ("r", "l", "c"):
                 value = float(eval(cls._codes[element["value"]][0], env))
-                if value < 0 or (kind != "r" and value == 0):
-                    raise SyntaxError(f"{name}: value must be positive", (file, number, 0, None))
+                if value < 0 or (kind == "c" and value == 0):
+                    requirement = "positive" if kind == "c" else "zero or positive"
+                    raise SyntaxError(f"{name}: value must be {requirement}", (file, number, 0, None))
             if kind in ("r", "l"):
-                key = tuple(sorted(element["keys"]))
+                values = {kind.upper(): value}
+                if "series" in element:
+                    other = "R" if kind == "l" else "L"
+                    values[other] = float(eval(cls._codes[element["series"]][0], env))
+                    if values[other] < 0:
+                        raise SyntaxError(f"{name}: {other} must be zero or positive", (file, number, 0, None))
+                key = ("card", name.lower()) if "series" in element else tuple(sorted(element["keys"]))
                 branch = branches.setdefault(key, {"nodes": element["keys"], "R": None, "L": None,
                                                    "names": [], "file": file, "line": number})
                 if branch[kind.upper()] is not None:
                     raise SyntaxError(f"{name}: a second {kind.upper()} between the same nodes; "
-                                       "only one R and one L per node pair", (file, number, 0, None))
-                if not perUnit:
-                    value = value / impedanceBase if kind == "r" else wBase * value / impedanceBase
-                branch[kind.upper()] = value
+                                       "only one R and one L per node pair (use L ... R=... for a "
+                                       "parallel branch)", (file, number, 0, None))
+                for part, partValue in values.items():
+                    if not perUnit:
+                        partValue = partValue / impedanceBase if part == "R" else wBase * partValue / impedanceBase
+                    branch[part] = partValue
                 branch["names"].append(name.lower())
             elif kind == "c":
                 node = busIndex[next(node for node in element["keys"] if node != "0")]
@@ -534,12 +555,13 @@ class NetlistSystem(System):
                         f"{name}: missing reference(s) "
                         f"{', '.join(symbol[:-len(device.index)] for symbol in missing)}", (file, number, 0, None))
                 node = busIndex[element["keys"][0]]
-                ports = voltageDevices if device.type == "Voltage" else currentDevices
-                if ports[node] is not None:
-                    raise SyntaxError(f"{name}: bus {busNames[node]} already has a {device.type.lower()}-port "
-                                       "device; a bus takes one voltage and one current device", (file, number, 0, None))
-                ports[node] = device
-                deviceLine[node] = deviceLine[node] or (file, number)
+                if device.type == "Voltage":
+                    if voltageDevices[node] is not None:
+                        raise SyntaxError(f"{name}: bus {busNames[node]} already has a voltage-port device; "
+                                           "a bus takes one voltage-port device", (file, number, 0, None))
+                    voltageDevices[node] = device
+                else:
+                    currentDevices[node].append(device)
                 devices[name.lower()] = device
 
         for node in range(count):
@@ -556,13 +578,9 @@ class NetlistSystem(System):
                 voltageDevices[node] = components.Infbus(vbase, sbase, "ground")
                 voltageDevices[node].p["kA"]["num"] = 100.0
                 references[str(voltageDevices[node].uref[0])] = 0.0
-            if currentDevices[node] is not None and voltageDevices[node] is None:
-                raise SyntaxError(
-                    f"bus {busNames[node]} has only a current-port device; it needs a voltage port "
-                    "(a C to ground or a voltage-port device)", (*deviceLine[node], 0, None))
-            if voltageDevices[node] is not None and currentDevices[node] is None:
-                currentDevices[node] = components.ZeroCurrent(
-                    vbase, sbase, f"{safeName}_zero")
+            # A bus without a voltage port is reduced by RLGrid.localDAEreduction.
+            if voltageDevices[node] is not None and not currentDevices[node]:
+                currentDevices[node] = [components.ZeroCurrent(vbase, sbase, f"{safeName}_zero")]
 
         branchList = list(branches.values())
         incidence = np.zeros((count, len(branchList)))
@@ -571,18 +589,39 @@ class NetlistSystem(System):
             incidence[busIndex[branch["nodes"][1]], column] = -1
         branchR = np.asarray([branch["R"] or 0.0 for branch in branchList])
         branchL = np.asarray([branch["L"] or 0.0 for branch in branchList])
-        passive = [node for node in range(count) if voltageDevices[node] is None]
-        _, reducedL, _ = RLGrid.kronReduction(incidence, branchL, branchR, passive)
-        if np.any(reducedL <= 0):
-            branch = next(branch for branch in branchList if branch["L"] is None)
-            raise SyntaxError(
-                f"{branch['names'][0]}: a branch without inductance remains after merging series "
-                "elements; add an L in series", (branch["file"], branch["line"], 0, None))
+        for branch in branchList:
+            if not branch["R"] and not branch["L"]:
+                raise SyntaxError(f"{branch['names'][0]}: the branch has zero impedance (R = L = 0)",
+                                  (branch["file"], branch["line"], 0, None))
+            if not branch["L"] and all(voltageDevices[busIndex[node]] is not None for node in branch["nodes"]):
+                raise SyntaxError(
+                    f"{branch['names'][0]}: a branch without inductance between two buses with voltage "
+                    "devices; add an L in series", (branch["file"], branch["line"], 0, None))
 
+        # Source locations for the frontend ("Open system code", "Open instance"): the
+        # netlist file, the X card of each device and the first card of each branch.
+        # Netlist text (netlist="...") has no file to open.
+        self.sourceReference = {"file": cls._filename, "line": 1, "column": 1} if Path(cls._filename).is_file() else None
+        self.deviceSources = {
+            id(devices[element["name"].lower()]): {"file": element["file"], "line": element["line"], "column": 1}
+            for element in cls._elements if element["kind"] == "x" and Path(element["file"]).is_file()
+        }
+        self.branchSources = [{"file": branch["file"], "line": branch["line"], "column": 1}
+                              if Path(branch["file"]).is_file() else self.sourceReference
+                              for branch in branches.values()] if self.sourceReference else None
+        currentDevices = [None if not items else items[0] if len(items) == 1 else items for items in currentDevices]
         devices.update({"Vdev": voltageDevices, "Idev": currentDevices})
         network = {"A": incidence, "R": branchR, "L": branchL, "busNames": busNames}
-        super().__init__(cls.__name__, network, devices,
-                         {"Vbase": vbase, "Sbase": sbase, "frequency_Hz": p["frequency_Hz"]}, references)
+        try:
+            super().__init__(cls.__name__, network, devices,
+                             {"Vbase": vbase, "Sbase": sbase, "frequency_Hz": p["frequency_Hz"]}, references)
+        except ValueError as error:
+            # RLGrid cannot reduce a bus ("bus a, b: ..."): report it at a card on that bus.
+            buses = str(error).split(":")[0].removeprefix("bus ").split(", ")
+            card = next((element for element in cls._elements
+                         if element["kind"] != "c" and element["nodes"][0] in buses), None)
+            location = (card["file"], card["line"]) if card else (cls._filename, 1)
+            raise SyntaxError(str(error), (*location, 0, None)) from None
         self.solverSettings = {
             "method": _METHODS[cls._options.get("method", "dop853")],
             "max_step": p.get("maxStep_s", 0.1 / wBase),
@@ -597,18 +636,26 @@ class NetlistSystem(System):
             f"{name}.{str(symbol)[:-len(device.index)].lower()}": self.stateNames.index(str(symbol))
             for name, device in devices.items() if name not in ("Vdev", "Idev") for symbol in device.x
         }
+        # Columns of V/IB/SB: retained buses, then buses reduced by RLGrid.localDAEreduction;
+        # network branches, then the branches of the reduced buses.
+        grid = self.rlGrid
         nodeIndex = {node: retained[index] for node, index in busIndex.items() if index in retained}
+        nodeIndex.update({node: grid.n + grid.floatingNodes.index(index)
+                          for node, index in busIndex.items() if index in grid.floatingNodes})
         survivors = [branch for branch in branchList
                      if busIndex[branch["nodes"][0]] in retained and busIndex[branch["nodes"][1]] in retained]
         branchIndex = {name: rank for rank, branch in enumerate(survivors) for name in branch["names"]}
+        branchIndex.update({name: grid.b + grid.floatingColumns.index(column)
+                            for column, branch in enumerate(branchList) if column in grid.floatingColumns
+                            for name in branch["names"]})
         maps = {"state": stateIndex, "node": nodeIndex, "branch": branchIndex}
         for _, used, file, number in cls._codes:
             for kind, key in used:
                 if key not in maps[kind]:
                     reason = {
                         "state": "no such device state (use @xname[state])",
-                        "node": "no such bus, or the node has no device and is eliminated",
-                        "branch": "no such R/L, or its branch is merged away with a passive node",
+                        "node": "no such bus, or the bus has no path to a source",
+                        "branch": "no such R/L, or it has no path to a source",
                     }[kind]
                     raise SyntaxError(f"{key}: {reason}", (file, number, 0, None))
         reference = next((position for position, original in enumerate(self.retainedNodeIndices)
@@ -616,6 +663,21 @@ class NetlistSystem(System):
                           and original != busIndex.get("0")), 0)
         self.netlistEnvironment = {**env, "IDX": stateIndex, "NODE": nodeIndex, "BR": branchIndex,
                                    "REF": reference}
+        self._floatingIncidence = incidence[np.ix_(grid.floatingNodes, grid.floatingColumns)]
+        self.referenceBusIndex = reference
+
+        # .probe outputs, evaluated by System.calculateSignals.
+        def evaluateProbe(code, time_s, state, networkSignals):
+            floatingVoltage = networkSignals["floatingVoltage"]
+            floatingPower = floatingVoltage * np.conj(networkSignals["floatingBranchCurrent"] @ self._floatingIncidence.T)
+            local = {"S": np.asarray(state), "time": np.asarray(time_s),
+                     "V": np.hstack((networkSignals["busVoltage"], floatingVoltage)),
+                     "IB": np.hstack((networkSignals["branchCurrent"], networkSignals["floatingBranchCurrent"])),
+                     "SB": np.hstack((networkSignals["busPower"], floatingPower))}
+            return np.real(eval(code, self.netlistEnvironment, local)) * np.ones(len(state))
+
+        self.probes = {name: (lambda time_s, state, net, code=cls._codes[index][0]: evaluateProbe(code, time_s, state, net))
+                       for name, index in cls._probes}
         if cls._meas:
             self.eventName = cls._meas["name"]
             self.eventDirection = cls._meas["direction"]
@@ -629,20 +691,12 @@ class NetlistSystem(System):
         code = type(self)._codes[type(self)._meas["code"]][0]
         local = {"S": np.asarray(state), "time": time_s}
         if {"V", "IB", "SB"} & set(code.co_names):
-            branch, voltage, current = self.rlGrid.g_numeric(state, self.getReference(time_s))
-            local["V"] = np.asarray(voltage).reshape(-1, 2) @ np.array([1, 1j])
-            local["IB"] = np.asarray(branch).reshape(-1, 2) @ np.array([1, 1j])
-            local["SB"] = local["V"] * np.conj(local["IB"] @ self.rlGrid.A.T)
+            grid = self.rlGrid
+            # g = [ib, vn, deviceCurrent, v_floating, i_floating], as complex pairs.
+            value = grid.g_core(state, self.getReference(time_s)).reshape(-1, 2) @ np.array([1, 1j])
+            branch, voltage, _, floatingVoltage, floatingBranch = np.split(
+                value, np.cumsum([grid.b, grid.n, grid.n, len(grid.floatingNodes)]))
+            local["V"] = np.r_[voltage, floatingVoltage]
+            local["IB"] = np.r_[branch, floatingBranch]
+            local["SB"] = local["V"] * np.conj(np.r_[branch @ grid.A.T, floatingBranch @ self._floatingIncidence.T])
         return float(np.real(eval(code, self.netlistEnvironment, local)))
-
-    def calculateSignals(self, time_s: Any, state: Any, networkSignals: dict[str, Any]):
-        """Bus voltages, angles, powers and line currents, plus the ``.probe`` outputs under ``probes``."""
-        state, time_s = np.asarray(state), np.asarray(time_s)
-        signals = self.busSignals(networkSignals, np.arange(self.rlGrid.n), self.netlistEnvironment["REF"])
-        local = {"S": state, "V": networkSignals["busVoltage"], "IB": networkSignals["branchCurrent"],
-                 "SB": networkSignals["busPower"], "time": time_s}
-        signals["probes"] = {
-            name: np.real(eval(type(self)._codes[index][0], self.netlistEnvironment, local)) * np.ones(len(state))
-            for name, index in type(self)._probes
-        }
-        return signals

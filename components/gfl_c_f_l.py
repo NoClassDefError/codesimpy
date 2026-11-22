@@ -1,6 +1,7 @@
 
 """Grid-following converter without outer loop."""
 
+import numpy as np
 import sympy as sp
 from ..core import Device
 
@@ -113,3 +114,20 @@ class GFL_C_F_L(Device):
             list(i) + [0.0, 0.0]
             + [theta, 0.0]
         )
+
+    def calculateSignals(self, time_s, x, u, uref):
+        """Terminal (PCC) voltage behind the internal Rg/Lg, its power, LVRT mode and PLL frequency."""
+        p = lambda name: self.p[name]["num"]
+        x, u = np.asarray(x), np.asarray(u)
+        current, theta, xPLL = x[:, 0:2], x[:, 4], x[:, 5]
+        cos, sin = np.cos(theta), np.sin(theta)
+        vd = cos * u[:, 0] + sin * u[:, 1] + p("Rg") * current[:, 0] - p("w0") * p("Lg") * current[:, 1]
+        vq = -sin * u[:, 0] + cos * u[:, 1] + p("Rg") * current[:, 1] + p("w0") * p("Lg") * current[:, 0]
+        magnitude = np.hypot(vd, vq)
+        return {
+            "pccVoltage": magnitude,
+            "activePower": vd * current[:, 0] + vq * current[:, 1],
+            "reactivePower": vq * current[:, 0] - vd * current[:, 1],
+            "lvrtMode": 0.5 * (1 + np.tanh(50 * (p("Vth") - magnitude))),
+            "pllFrequency": np.clip(p("w0") + p("KpPll") * vq + p("KiPll") * xPLL, p("wPllMin"), p("wPllMax")),
+        }

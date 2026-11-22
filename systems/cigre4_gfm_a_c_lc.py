@@ -157,12 +157,7 @@ class _CIGRE4GFMAdmittance(System):
     def eventHandler(self, time_s, state):
         return _CIGRE14.eventHandler(self, time_s, state)
 
-    def calculateSignals(self, time_s, state, networkSignals):
-        return _CIGRE14.calculateSignals(self, time_s, state, networkSignals)
-
-
 class CIGRE4__GFM_A_C_LC__GFL_C_F_L(_CIGRE4GFMAdmittance):
     """CIGRE4 · GFM_A_C_LC at bus 9 (virtual admittance + current PI, circular current-reference limit; its
     capacitor is the bus-9 line capacitance, no converter filter capacitor) + GFL_C_F_L at bus 7 (current
     references, FRT current priority; bus-7 line capacitance only). The p261030 tier-A benchmark."""
-

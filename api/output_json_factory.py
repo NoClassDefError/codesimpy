@@ -1,13 +1,15 @@
-"""Convert simulation and analysis results to the frontend JSON schema."""
+"""JSON interface to the extension: stdout messages, streamed chunks and the descriptor.
+
+Results are converted to the frontend descriptor (plot signals, small-signal and
+interaction views, power flow) only for the JSON lines on stdout; the saved data log is
+written by :class:`~codesimpy.api.output_mat_factory.OutputMatFactory`."""
 
 from __future__ import annotations
 
 import json
 import inspect
-import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +22,8 @@ class OutputJsonFactory:
         "wBase", "Rg", "Lg", "breakpoints_s", "gridVoltage", "Zbase_ohm",
     })
 
-    def __init__(self, system: Any = None, outputDirectory: str | Path | None = None) -> None:
-        """[shared] Initialize stdout streaming state and snapshot storage state."""
+    def __init__(self, system: Any = None) -> None:
+        """[shared] Initialize the stdout streaming state and the descriptor caches."""
         self.system = system
         self.requestId: Any = None
         self.sequence = 0
@@ -32,7 +34,6 @@ class OutputJsonFactory:
         # hundred output samples.  Larger chunks made short runs emit their
         # first waveform update only when integration was nearly complete.
         self.chunkSize = 50
-        self.latestSimulation: dict[str, Any] = {}
         self.latestSmallSignal: dict[str, Any] = {}
         # The analysis object behind latestSmallSignal; snapshots re-serialize
         # only when a new analysis replaced it.
@@ -43,8 +44,6 @@ class OutputJsonFactory:
         self.latestRMS: dict[str, Any] = {}
         # (reference at t = 0, serialized power flow) of the last serializePowerFlow call.
         self._powerFlowCache: tuple[tuple[float, ...], dict[str, Any]] | None = None
-        self.outputDirectory = Path(outputDirectory) if outputDirectory else Path(__file__).resolve().parents[2] / "codegen"
-        self.preserveExisting = True
 
     @staticmethod
     def _parameter(parameterId: str, label: str, value: Any, unit: str = "", group: str = ""):
@@ -147,12 +146,14 @@ class OutputJsonFactory:
         ]
         index = str(device.index).lstrip("_")
         source = {"file": inspect.getsourcefile(device.__class__) or "", "line": 1, "column": 1}
+        # Netlist systems know the X card of each device.
+        instanceSource = getattr(self.system, "deviceSources", {}).get(id(device), source)
         return {
             "id": re.sub(r"[^a-zA-Z0-9_-]", "-", f"{shortName}-{index}").lower(),
             "name": f"{shortName} {index}", "className": className,
             "kind": kind, "icon": icon, "portType": device.type,
             "parameters": parameters,
-            "classSource": source, "instanceSource": source,
+            "classSource": source, "instanceSource": instanceSource,
         }
 
     def editableParameterNames(self) -> list[str]:
@@ -187,10 +188,13 @@ class OutputJsonFactory:
         L = np.asarray(self.system.network["L"]).reshape(-1)
         Vdev = list(self.system.devices["Vdev"])
         Idev = list(self.system.devices["Idev"])
-        source = {
+        # A netlist system's class is generated (registry / systems package), so its
+        # code is the .cir file, not the module the class was created in.
+        source = getattr(self.system, "sourceReference", None) or {
             "file": inspect.getsourcefile(self.system.__class__) or "",
             "line": 1, "column": 1,
         }
+        branchSources = getattr(self.system, "branchSources", None)
         components, connections = [], []
         busIds = [f"bus-{i + 1}" for i in range(A.shape[0])]
         for i, (busId, busName) in enumerate(zip(busIds, busNames)):
@@ -199,7 +203,8 @@ class OutputJsonFactory:
                 "kind": "bus", "icon": "bus", "portType": "", "parameters": [],
                 "classSource": source, "instanceSource": source,
             })
-            for device in (Vdev[i], Idev[i]):
+            currentDevices = Idev[i] if isinstance(Idev[i], (list, tuple)) else [Idev[i]]
+            for device in (Vdev[i], *currentDevices):
                 if device is None or device.__class__.__name__ == "ZeroCurrent":
                     continue
                 descriptor = self.describeDevice(device)
@@ -223,7 +228,7 @@ class OutputJsonFactory:
                 "sourceHandle": "right", "targetHandle": "left",
                 "parameters": [self._parameter("R", "Resistance", R[i], "pu", "Line"),
                                self._parameter("L", "Inductance", L[i], "pu", "Line")],
-                "sourceReference": source,
+                "sourceReference": branchSources[i] if branchSources and i < len(branchSources) else source,
             })
         editableParameterNames = self.editableParameterNames()
         systemParameters = [
@@ -292,9 +297,13 @@ class OutputJsonFactory:
         empty = np.setdiff1d(np.arange(A.shape[0]), retained)
         voltage = np.zeros(A.shape[0], dtype=complex)
         voltage[retained] = info["busVoltage"]
+        # Buses without a voltage device are part of the power flow; the rest have no source.
+        voltage[np.asarray(grid.floatingNodes, dtype=int)] = info["floatingVoltage"]
+        empty = np.setdiff1d(empty, grid.floatingNodes)
+        known = np.setdiff1d(np.arange(A.shape[0]), empty)
         if empty.size:
             Y = A @ np.diag(1 / Z) @ A.T
-            voltage[empty] = -np.linalg.solve(Y[np.ix_(empty, empty)], Y[np.ix_(empty, retained)] @ voltage[retained])
+            voltage[empty] = -np.linalg.lstsq(Y[np.ix_(empty, empty)], Y[np.ix_(empty, known)] @ voltage[known], rcond=None)[0]
 
         for i, value in enumerate(voltage):
             result["buses"][f"bus-{i + 1}"] = {"V": float(abs(value)), "thetaDeg": float(np.degrees(np.angle(value)))}
@@ -310,7 +319,8 @@ class OutputJsonFactory:
                 "PTo": float(receiving.real), "QTo": float(receiving.imag),
                 "I": float(abs(current)), "loss": float(sending.real - receiving.real),
             }
-        for device, P, Q in zip(grid.Vdev + grid.Idev, info["Pdevice"], info["Qdevice"]):
+        for device, P, Q in zip(grid.Vdev + grid.Idev + [item for item, _ in grid.attached],
+                                info["Pdevice"], info["Qdevice"]):
             if device.__class__.__name__ == "ZeroCurrent":
                 continue
             result["components"][self.describeDevice(device)["id"]] = {"P": float(P), "Q": float(Q)}
@@ -326,59 +336,6 @@ class OutputJsonFactory:
         if simulation:
             self._signalsCache = (simulation, list(busIds), signals)
         return signals
-
-    def saveSnapshot(self, simulation: dict[str, Any] | None = None):
-        """[snapshot] Atomically write the latest frontend descriptor to disk."""
-        if simulation is not None:
-            self.latestSimulation = simulation
-        descriptor = self.getDescriptor(self.latestSimulation)
-        self.outputDirectory.mkdir(parents=True, exist_ok=True)
-        modelName = re.sub(r'[<>:"/\\|?*]', "-", self.system.name)
-        snapshotFile = self.outputDirectory / f"{modelName}-snapshot.json"
-        if self.preserveExisting and snapshotFile.exists():
-            try:
-                existing = json.loads(snapshotFile.read_text(encoding="utf-8"))
-                descriptor = self.mergeSnapshot(descriptor, existing)
-            except (OSError, json.JSONDecodeError):
-                pass
-        payload = json.dumps(self.jsonSafe(descriptor), ensure_ascii=False, allow_nan=False)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.outputDirectory, delete=False) as handle:
-            handle.write(payload); temporary = Path(handle.name)
-        os.replace(temporary, snapshotFile)
-        return snapshotFile, descriptor
-
-    def mergeSnapshot(self, descriptor: dict[str, Any], existing: dict[str, Any]):
-        """[snapshot] Preserve compatible results and layout from an existing file."""
-        existing = existing.get("frontendDescriptor", existing)
-        if existing.get("system", {}).get("id") != descriptor.get("system", {}).get("id"):
-            return descriptor
-        savedParameters = {row["id"]: row["value"] for row in existing["system"].get("parameters", [])}
-        currentParameters = {row["id"]: row["value"] for row in descriptor["system"].get("parameters", [])}
-        compatible = savedParameters == currentParameters
-        newSimulation = bool(descriptor.get("signals"))
-        if compatible and not newSimulation and existing.get("signals"):
-            descriptor["signals"] = existing["signals"]
-        if compatible and not descriptor.get("simulationData") and existing.get("simulationData"):
-            descriptor["simulationData"] = existing["simulationData"]
-        if not descriptor.get("layout") and existing.get("layout"):
-            descriptor["layout"] = existing["layout"]
-        smallSignal = descriptor.get("smallSignal", {})
-        existingSmallSignal = existing.get("smallSignal", {})
-        if compatible and not (smallSignal.get("available") and smallSignal.get("modes")) and (
-            existingSmallSignal.get("available") and existingSmallSignal.get("modes")
-        ):
-            descriptor["smallSignal"] = existing["smallSignal"]
-        interaction = descriptor.get("interactionAnalysis", {})
-        existingInteraction = existing.get("interactionAnalysis", {})
-        if compatible and not (interaction.get("available") and interaction.get("matrices")) and (
-            existingInteraction.get("available") and existingInteraction.get("matrices")
-        ):
-            descriptor["interactionAnalysis"] = existing["interactionAnalysis"]
-        rms = descriptor.get("rmsSimulation", {})
-        existingRMS = existing.get("rmsSimulation", {})
-        if compatible and not rms.get("available") and existingRMS.get("available"):
-            descriptor["rmsSimulation"] = existingRMS
-        return descriptor
 
     def serializeRMS(
         self, rms: dict[str, Any], corrected: dict[str, Any] | None = None,
@@ -476,10 +433,15 @@ class OutputJsonFactory:
         branchRows, busRows = 2 * grid.b, 2 * grid.n
         # Bus names may contain spaces and underscores: render them as text.
         busNames = [str(name).replace("_", r"\_") for name in self.system.busNames]
+        # Buses without a voltage device (reduced by RLGrid.localDAEreduction) and their branches.
+        allBusNames = [str(name).replace("_", r"\_") for name in self.system.network["busNames"]]
+        floatingRows, floatingBranchRows = 2 * len(grid.floatingNodes), 2 * len(grid.floatingColumns)
         outputLabels = (
             [latex(symbol) for symbol in grid.ibsym]
             + [rf"v_{{\text{{{name}}},{axis}}}" for name in busNames for axis in "dq"]
             + [rf"i_{{\text{{dev}},\text{{{name}}},{axis}}}" for name in busNames for axis in "dq"]
+            + [rf"v_{{\text{{{allBusNames[node]}}},{axis}}}" for node in grid.floatingNodes for axis in "dq"]
+            + [rf"i_{{\text{{branch {column + 1}}},{axis}}}" for column in grid.floatingColumns for axis in "dq"]
         )
         outputGroups = [
             {"name": name, "indices": list(range(start, start + count))}
@@ -487,6 +449,8 @@ class OutputJsonFactory:
                 ("Branch currents", 0, branchRows),
                 ("Bus voltages", branchRows, busRows),
                 ("Device currents", branchRows + busRows, busRows),
+                ("Reduced bus voltages", branchRows + 2 * busRows, floatingRows),
+                ("Reduced branch currents", branchRows + 2 * busRows + floatingRows, floatingBranchRows),
             ) if count
         ]
         stateLatex = [latex(symbol) for symbol in grid.x]
@@ -680,8 +644,6 @@ class OutputJsonFactory:
             ("activePower", "P", "pu", "component"),
             ("reactivePower", "Q", "pu", "component"),
             ("busVoltageAngleDeg", "theta", "deg", "component"),
-            ("pccVoltage", "PCC voltage", "pu", "system"),
-            ("lvrtMode", "LVRT mode", "", "system"),
         )
         for field, label, unit, ownerKind in plotDefinitions:
             if field not in values:
@@ -707,6 +669,10 @@ class OutputJsonFactory:
                 ))
         for name, series in values.get("probes", {}).items():  # netlist .probe outputs
             signals.append(self.makeSignal(systemId, "system", str(name), "", time, series))
+        for deviceName, deviceSignals in values.get("devices", {}).items():  # Device.calculateSignals
+            owner = re.sub(r"[^a-zA-Z0-9_-]", "-", deviceName).lower()
+            for name, series in deviceSignals.items():
+                signals.append(self.makeSignal(owner, "component", str(name), "", time, series))
         if "state" in simulation:
             state = np.asarray(simulation["state"])
             stateNames = list(map(str, simulation.get("stateNames", self.system.stateNames)))
@@ -715,7 +681,9 @@ class OutputJsonFactory:
             if state.shape[0] != time.size and state.shape[1] == time.size:
                 state = state.T
             stateOwners: dict[str, str] = {}
-            for device in [*self.system.devices["Vdev"], *self.system.devices["Idev"]]:
+            for device in [*self.system.devices["Vdev"], *(
+                    item for entry in self.system.devices["Idev"]
+                    for item in (entry if isinstance(entry, (list, tuple)) else [entry]))]:
                 if device is None:
                     continue
                 shortName = device.__class__.__name__

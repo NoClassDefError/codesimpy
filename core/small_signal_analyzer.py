@@ -62,7 +62,11 @@ class SmallSignalAnalyzer:
         grid.refreshParameters()
         branch, voltage, current = grid.g_numeric(state, reference)
         pair = slice(2 * node, 2 * node + 2)
-        if device.type == "Current":
+        if device.type == "Current" and node >= grid.n:
+            # Bus without a voltage device: its voltage follows the device currents in g.
+            start = 2 * grid.b + 4 * grid.n + 2 * (node - grid.n)
+            portInput = np.asarray(grid.g_core(state, reference), dtype=float)[start:start + 2]
+        elif device.type == "Current":
             portInput = np.asarray(voltage, dtype=float)[pair]
         else:
             networkCurrent = np.kron(grid.A, np.eye(2)) @ np.asarray(branch, dtype=float)
@@ -152,12 +156,13 @@ class SmallSignalAnalyzer:
         frequency_Hz = np.atleast_1d(np.asarray(frequency_Hz, dtype=float))
         wBase = 2 * np.pi * system.base["frequency_Hz"]
         s = np.r_[0.0, 1j * 2 * np.pi * frequency_Hz / wBase]
-        identity, n = np.eye(2), grid.n
+        # Whole network: retained buses, then the buses without a voltage device.
+        identity, n = np.eye(2), grid.pfA.shape[0]
         Y = np.zeros((s.size, 2 * n, 2 * n), complex)
-        for branch in range(grid.b):
-            z = grid.R[branch] * identity + grid.L[branch] * (s[:, None, None] * identity + _J)
+        for branch in range(grid.pfA.shape[1]):
+            z = grid.pfR[branch] * identity + grid.pfL[branch] * (s[:, None, None] * identity + _J)
             y = np.linalg.inv(z)
-            incidence = np.kron(grid.A[:, branch].reshape(-1, 1), identity)
+            incidence = np.kron(grid.pfA[:, branch].reshape(-1, 1), identity)
             Y += incidence @ y @ incidence.T
         if includeShunts:
             for node, device in enumerate(grid.Vdev):
@@ -226,6 +231,9 @@ class SmallSignalAnalyzer:
         for node, (voltageDevice, currentDevice) in enumerate(zip(grid.Vdev, grid.Idev)):
             if device is voltageDevice or device is currentDevice:
                 return node
+        for attached, node in grid.attached:
+            if device is attached:
+                return node  # power-flow node: >= grid.n for a bus without a voltage device
         raise ValueError("device is not connected to this system")
 
     @staticmethod
@@ -349,7 +357,7 @@ class SmallSignalAnalyzer:
         """
         names, grid = self.system.stateNames, self.system.rlGrid
         if devices is None:
-            devices = [device for device in list(grid.Vdev) + list(grid.Idev)
+            devices = [device for device in list(grid.Vdev) + list(grid.Idev) + [item for item, _ in grid.attached]
                        if type(device).__name__ not in self.NETWORK_DEVICE_TYPES and len(device.x)]
         blocks, used = [], set()
         for device in devices:

@@ -1,0 +1,44 @@
+TEST5 (netlist) · GFM_A_C_L on a bus without capacitor + two GFL_C_F_L on one bus, passive cluster with a resistive load
+* Test system for the reduction of buses without a voltage device (RLGrid.localDAEreduction), per unit on
+* 10 MVA / 20 kV:
+*   src (infinite bus) --Ls--> m --R1/L1 and Lp (parallel)--> b1 --Lgfm--> g
+*                              m --Rload (L = 0)--> n2 --Lload--> ground
+* - m and n2 form one cluster without devices: the KCL of n2 is index 1 (resistive branch), the sum of the
+*   KCL of m and n2 is index 2 and removes one inductive branch current.
+* - b1 has a capacitor (voltage port) and two current devices (two GFLs).
+* - g has only GFM_A_C_L and one branch: the PCC is removed exactly (the GFM is linear in its port voltage).
+* Tight tolerances: the reduced GFM terminal voltage vm(g) contains Lgfm*di/dt of a high-gain current loop,
+* so it amplifies integration errors (about 0.5 pu at reltol=1e-3).
+.options sbase=10meg vbase=20k freq=50 units=pu method=dop853 reltol=1e-8 abstol=1e-10 residualtol=1e-4
+.param faultStart_s=0.3 faultComplete_s=0.301 recoveryStart_s=0.6 recoveryComplete_s=0.601 faultVoltage=0.5
++ GFLPref=0.8 GFMPref=0.8 GFMVref=1.05
+
+* Upstream grid with a voltage dip
+Xgrid src 0 Infbus kA=100
++ Aref=PWL(0 1 {faultStart_s} 1 {faultComplete_s} {faultVoltage} {recoveryStart_s} {faultVoltage} {recoveryComplete_s} 1 1 1)
+
+* Feeder: combined RL card (HSPICE style), merged series R and L, and a parallel branch
+Ls src m 0.10 R=0.02
+R1 m b1 0.03
+L1 m b1 0.15
+Lp m b1 0.30 R=0.06
+
+* Load through a passive bus: R only (L = 0), then an inductance to ground
+Rload m n2 2.0
+Lload n2 0 0.5
+
+* Converter bus with a capacitor and two GFLs (several current devices on one bus)
+C1 b1 0 0.02
+Xgfl1 b1 0 GFL_C_F_L Sb=2meg L=0.07 Kpcc=0.3 Kicc=1 KpPll=0.2 KiPll=0.02 Idref={GFLPref} Iqref=0
+Xgfl2 b1 0 GFL_C_F_L Sb=3meg L=0.07 Kpcc=0.3 Kicc=1 KpPll=0.2 KiPll=0.02 Idref={GFLPref} Iqref=0
+
+* GFM without a terminal capacitor behind its connection branch: bus g has no voltage device
+Lgfm b1 g 0.08 R=0.01
+Xgfm g 0 GFM_A_C_L Sb=3meg Lf=0.07 Rv=0.05 Lv=0.01 Imax=1.5 Kp=0.05 Kp_cc=20 Ki_cc=5
++ Pref={GFMPref} Vref={GFMVref} wref=1
+
+.tran 0.1m 1
+* Reduced buses (m, n2, g) and branches can be probed like any other.
+.probe tran Vm=vm(m) Vn2=vm(n2) Vb1=vm(b1) Vg=vm(g) Pg=par('p(g)') Iload=im(Lload) Igfm=im(Lgfm)
++ delta=par('wrap(@xgfm[delta])')
+.end

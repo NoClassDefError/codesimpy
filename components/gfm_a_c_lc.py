@@ -9,6 +9,7 @@ from ..core import Device
 class GFM_A_C_LC(Device):
     """GFM · A: virtual admittance + current PI · C: circular limit on the current reference · LC: terminal capacitor in the device (voltage port)."""
     thetaIndices = (9,)
+    angleIndices = (8,)  # delta
     rmsDynamicIndices = (8,)  # delta
 
     def __init__(self, Vb: float, Sb: float, index: str) -> None:

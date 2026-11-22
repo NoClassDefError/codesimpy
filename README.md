@@ -121,7 +121,7 @@ The repository root is the `codesimpy` package. The VS Code extension lives in a
 codesimpy/
 ├─ api/
 │  ├─ cli.py                  Resident stdio service and analysis endpoints
-│  └─ output_json_factory.py  Stdout and snapshot serialization
+│  └─ output_mat_factory.py  Stdout and snapshot serialization
 ├─ components/                Converter, machine, source, and load models
 ├─ core/
 │  ├─ device.py               Device base class
@@ -145,7 +145,7 @@ python -m unittest discover -s codesimpy/tests -t .
 
 ## Extending CodeSim
 
-See the [model-building guide](docs/guide.md). It walks through writing a component (`Device`) and a system (`System`) step by step, and how to run it. A system can also be a SPICE netlist (`.cir`) instead of Python code; see [Systems from a netlist](docs/guide.md#guide-netlist).
+See the [model-building guide](docs/guide.md). It walks through writing a component (`Device`) and a system, a SPICE netlist (`.cir`; see [Write a system](docs/guide.md#guide-netlist)), step by step, and how to run it.
 
 ## Current limitations and Roadmap
 

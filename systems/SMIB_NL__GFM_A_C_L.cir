@@ -1,0 +1,22 @@
+SMIB · GFM_A_C_L (netlist)
+* GFM_A_C_L on an infinite bus through the grid branch Rg + jLg: the netlist
+* twin of SMIB__GFM_A_C_L (time-based clearing), written in docs/guide.md.
+.options sbase=8100 freq=50 units=pu
+.param SCR=2 rho=0.1 faultVoltage=0.5
++ faultStart_s=0.2 faultComplete_s=0.201 recoveryStart_s=1 recoveryComplete_s=1.001
+
+* Converter at the PCC (no capacitor: the PCC is reduced exactly).
+Xvsg pcc 0 GFM_A_C_L Lf=0.07 Rv=0.05 Lv=0.01 Imax=1.5 Kp=0.05 Kp_cc=20 Ki_cc=5
++ Pref=1 Vref=1.1 wref=1
+
+* Grid branch: one card for the series R and L.
+Lgrid pcc inf {1/(SCR*sqrt(1+rho^2))} R={rho/(SCR*sqrt(1+rho^2))}
+
+* Infinite bus with a voltage dip from faultStart_s to recoveryStart_s.
+Xgrid inf 0 Infbus
++ Aref=PWL(0 1 {faultStart_s} 1 {faultComplete_s} {faultVoltage} {recoveryStart_s} {faultVoltage} {recoveryComplete_s} 1)
+
+.tran 0.1m 2
+.options reltol=1e-6 abstol=1e-9
+.probe tran delta=par('@xvsg[delta]') Ppcc=par('P(pcc)') Vpcc=vm(pcc)
+.end

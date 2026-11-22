@@ -153,19 +153,6 @@ class _CIGRE14(System):
             p["angleClearUpper_rad"] - angle,
         )
 
-    def calculateSignals(self, time_s, state, net):
-        state, time_s = np.asarray(state), np.asarray(time_s)
-        idx = [self.stateNames.index(str(symbol)) for symbol in self.devices["vsg"].x]
-        signals = self.busSignals(net, np.arange(self.rlGrid.n), 0)
-        signals["irefDQ"] = state[:, idx[2:4]]
-        signals["filterCurrentDQ"] = state[:, idx[4:6]]
-        signals["filterCurrentMagnitude"] = np.linalg.norm(signals["filterCurrentDQ"], axis=1)
-        delta = state[:, idx[8]]
-        signals["delta"] = (delta + np.pi) % (2 * np.pi) - np.pi
-        signals["dot_delta"] = np.gradient(np.unwrap(delta), time_s) if len(time_s) > 1 else np.zeros_like(delta)
-        return signals
-
-
 class CIGRE14__GFM_A_C_LC__GFL_C_F_L(_CIGRE14):
     """CIGRE14 · GFM_A_C_LC at bus 9 (virtual admittance + current PI, circular current-reference limit; its
     capacitor is the bus-9 line capacitance) + GFL_C_F_L at bus 7 (current references, FRT current priority, no

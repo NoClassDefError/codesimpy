@@ -9,10 +9,10 @@ Users mark a system class with :func:`system`::
     class MySMIB(SMIB__GFL_C_F_L):
         ...
 
-:func:`discover` imports the decorated files of a workspace folder, loads its
-``.cir`` netlists as :class:`~codesimpy.core.NetlistSystem` classes and returns
-a :class:`Registry`. Components a Python system creates itself need no
-registration; user components used by a netlist ``X`` line are marked with
+:meth:`Registry.discover` (alias :func:`discover`) imports the decorated files of a
+:class:`Workspace`, loads its ``.cir`` netlists as :class:`~codesimpy.core.NetlistSystem`
+classes and returns a :class:`Registry`. Components a Python system creates itself need
+no registration; user components used by a netlist ``X`` line are marked with
 :func:`device` (built-in components are found by their class name).
 """
 
@@ -24,6 +24,7 @@ import inspect
 import sys
 import traceback
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, TypeVar, overload
 
@@ -34,15 +35,8 @@ except ModuleNotFoundError:  # Python < 3.11
 
 T = TypeVar("T", bound=type)
 
-_ATTR = "__codesim__"
-_DEVICE_ATTR = "__codesim_device__"
 #: ``@device`` classes by lower-case name: the models a netlist ``X`` line can use.
 DEVICES: dict[str, type] = {}
-USER_MODULE_PREFIX = "codesimpy_user"
-_SKIPPED_DIRECTORIES = {
-    ".git", ".hg", ".svn", ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache",
-    "node_modules", "__pycache__", "build", "dist", "site-packages",
-}
 
 
 @dataclass(frozen=True)
@@ -54,6 +48,13 @@ class Meta:
     description: str = ""
     file: str = ""
     line: int = 0
+
+    ATTRIBUTE = "__codesim__"
+
+    @classmethod
+    def of(cls, target: type) -> Meta | None:
+        """The class's own ``@system`` metadata; subclasses do not inherit registration."""
+        return target.__dict__.get(cls.ATTRIBUTE)
 
 
 @overload
@@ -80,21 +81,15 @@ def system(cls=None, /, *, id=None, label=None, category="", description=None):
         if not callable(getattr(target, "defaultParameters", None)):
             raise TypeError(f"@system {target.__name__} must define defaultParameters(overrides)")
         try:
-            file = inspect.getsourcefile(target) or ""
-            line = inspect.getsourcelines(target)[1]
+            file, line = inspect.getsourcefile(target) or "", inspect.getsourcelines(target)[1]
         except (OSError, TypeError):  # no source available (e.g. compiled)
             file, line = "", 0
         systemId = id or target.__name__
-        setattr(target, _ATTR, Meta(
-            id=systemId,
-            label=label or systemId,
-            category=category,
-            description=(
-                description if description is not None
-                else (inspect.getdoc(target) or "").split("\n")[0]
-            ),
-            file=file,
-            line=line,
+        firstDocLine = (inspect.getdoc(target) or "").split("\n")[0]
+        setattr(target, Meta.ATTRIBUTE, Meta(
+            id=systemId, label=label or systemId, category=category,
+            description=description if description is not None else firstDocLine,
+            file=file, line=line,
         ))
         return target
 
@@ -125,16 +120,92 @@ def device(cls=None, /, *, name=None):
                 f"device name {deviceName!r} is already used by "
                 f"{existing.__module__}.{existing.__qualname__}"
             )
-        setattr(target, _DEVICE_ATTR, deviceName)
+        setattr(target, "__codesim_device__", deviceName)
         DEVICES[deviceName.lower()] = target
         return target
 
     return apply(cls) if cls is not None else apply
 
 
-def meta_of(cls: type) -> Meta | None:
-    """The class's own ``@system`` metadata; subclasses do not inherit registration."""
-    return cls.__dict__.get(_ATTR)
+class Workspace:
+    """A user folder: its ``[tool.codesim]`` configuration, the files to load and their import."""
+
+    MODULE_PREFIX = "codesimpy_user"
+    SKIPPED_DIRECTORIES = {
+        ".git", ".hg", ".svn", ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache",
+        "node_modules", "__pycache__", "build", "dist", "site-packages",
+    }
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root).resolve()
+
+    @cached_property
+    def config(self) -> dict[str, Any]:
+        """``[tool.codesim]`` of the workspace ``pyproject.toml`` (empty without one)."""
+        pyproject = self.root / "pyproject.toml"
+        if tomllib is None or not pyproject.is_file():
+            return {}
+        with pyproject.open("rb") as stream:
+            return tomllib.load(stream).get("tool", {}).get("codesim", {})
+
+    def files(self) -> list[Path]:
+        """Files to load: ``[tool.codesim] systems`` globs, else every ``.cir`` netlist and
+        every ``.py`` file that defines a class decorated with ``system`` or ``device``."""
+        patterns = self.config.get("systems")
+        if patterns:
+            files = {path.resolve() for pattern in patterns for path in self.root.glob(pattern) if path.is_file()}
+            files -= {path.resolve() for pattern in self.config.get("exclude", []) for path in self.root.glob(pattern)}
+            return sorted(path for path in files if path.suffix in (".py", ".cir"))
+        found = []
+        for path in [*self.root.rglob("*.py"), *self.root.rglob("*.cir")]:
+            parts = path.relative_to(self.root).parts
+            if any(part in self.SKIPPED_DIRECTORIES or part.startswith(".") for part in parts[:-1]):
+                continue
+            if path.suffix == ".py":
+                # Parse (never run) the file and look for @system / @device on a class.
+                try:
+                    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+                except (SyntaxError, UnicodeDecodeError, ValueError):
+                    tree = None  # import it anyway, so the user sees the real error
+                except OSError:
+                    continue
+                decorators = set() if tree is None else {
+                    target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", None)
+                    for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+                    for decorator in node.decorator_list
+                    for target in [decorator.func if isinstance(decorator, ast.Call) else decorator]
+                }
+                if tree is not None and not decorators & {"system", "device"}:
+                    continue
+            found.append(path.resolve())
+        return sorted(found)
+
+    def importFile(self, path: Path):
+        """Import a file of this workspace as ``codesimpy_user.<relative.path>``; the
+        workspace goes on ``sys.path`` so the file can import its sibling modules."""
+        if str(self.root) not in sys.path:
+            sys.path.insert(0, str(self.root))
+        parts = Path(path).relative_to(self.root).with_suffix("").parts
+        name = ".".join([self.MODULE_PREFIX, *(
+            "".join(char if char.isalnum() or char == "_" else "_" for char in part) for part in parts)])
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot import {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+        return module
+
+    @classmethod
+    def purgeModules(cls) -> None:
+        """Forget previously imported workspace files so the next import reads them again."""
+        for name in [name for name in sys.modules
+                     if name == cls.MODULE_PREFIX or name.startswith(cls.MODULE_PREFIX + ".")]:
+            del sys.modules[name]
 
 
 @dataclass
@@ -169,6 +240,17 @@ class Registry:
             raise ValueError(f"system id {entry.id!r} is already registered by {where}")
         self.systems[entry.id] = entry
 
+    def recordError(self, path: Path, error: BaseException) -> None:
+        """Keep a load error of ``path``, with the line in that file where it happened."""
+        line = error.lineno if isinstance(error, SyntaxError) and error.lineno else next((
+            frame.lineno or 0 for frame in reversed(traceback.extract_tb(error.__traceback__))
+            if Path(frame.filename).resolve() == path.resolve()), 0)
+        self.errors.append({
+            "file": str(path), "line": line,
+            "error": f"{type(error).__name__}: {error}",
+            "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+        })
+
     def describe(self) -> dict[str, Any]:
         return {
             "workspace": self.workspace,
@@ -176,167 +258,60 @@ class Registry:
             "errors": list(self.errors),
         }
 
+    @classmethod
+    def discover(cls, workspace: str | Path | None = None) -> Registry:
+        """Built-in systems, plus the ``@system`` classes and ``.cir`` netlists found in ``workspace``."""
+        from . import systems as builtin
+        from .core import NetlistSystem
 
-def _uses_system_decorator(path: Path) -> bool:
-    """True when the file defines a class decorated with ``system`` or ``device`` (parsed, never run)."""
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
-        return True  # import it so the user sees the real error
-    except OSError:
-        return False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for decorator in node.decorator_list:
-            target = decorator.func if isinstance(decorator, ast.Call) else decorator
-            if isinstance(target, ast.Attribute):
-                name = target.attr
-            elif isinstance(target, ast.Name):
-                name = target.id
-            else:
-                continue
-            if name in ("system", "device"):
-                return True
-    return False
+        registry = cls()
+        for name in builtin.__all__:
+            systemClass = getattr(builtin, name)
+            meta = Meta.of(systemClass)
+            registry.add(SystemEntry(
+                id=meta.id if meta else name, cls=systemClass, source="builtin",
+                label=meta.label if meta else name,
+                category=meta.category if meta else "",
+                description=meta.description if meta else (inspect.getdoc(systemClass) or "").split("\n")[0],
+            ))
+        if workspace is None:
+            return registry
 
-
-def _workspace_config(workspace: Path) -> dict[str, Any]:
-    pyproject = workspace / "pyproject.toml"
-    if tomllib is None or not pyproject.is_file():
-        return {}
-    with pyproject.open("rb") as stream:
-        return tomllib.load(stream).get("tool", {}).get("codesim", {})
-
-
-def find_user_files(workspace: str | Path) -> list[Path]:
-    """Files to load: ``[tool.codesim] systems`` globs, else every ``.cir`` netlist and
-    every ``.py`` file using ``@system`` or ``@device``."""
-    root = Path(workspace).resolve()
-    config = _workspace_config(root)
-    patterns = config.get("systems")
-    if patterns:
-        files = {path.resolve() for pattern in patterns for path in root.glob(pattern) if path.is_file()}
-        files -= {path.resolve() for pattern in config.get("exclude", []) for path in root.glob(pattern)}
-        return sorted(path for path in files if path.suffix in (".py", ".cir"))
-    found = []
-    for path in [*root.rglob("*.py"), *root.rglob("*.cir")]:
-        parts = path.relative_to(root).parts
-        if any(part in _SKIPPED_DIRECTORIES or part.startswith(".") for part in parts[:-1]):
-            continue
-        if path.suffix == ".cir" or _uses_system_decorator(path):
-            found.append(path.resolve())
-    return sorted(found)
-
-
-def _module_name(path: Path, workspace: Path) -> str:
-    parts = path.relative_to(workspace).with_suffix("").parts
-    safe = ["".join(c if c.isalnum() or c == "_" else "_" for c in part) for part in parts]
-    return ".".join([USER_MODULE_PREFIX, *safe])
-
-
-def purge_user_modules() -> None:
-    """Forget previously imported workspace files so the next import reads them again."""
-    for name in [name for name in sys.modules if name == USER_MODULE_PREFIX
-                 or name.startswith(USER_MODULE_PREFIX + ".")]:
-        del sys.modules[name]
-
-
-def import_user_file(path: Path, workspace: Path):
-    if str(workspace) not in sys.path:
-        sys.path.insert(0, str(workspace))  # lets user files import their sibling modules
-    name = _module_name(path, workspace)
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot import {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        sys.modules.pop(name, None)
-        raise
-    return module
-
-
-def _builtin_entries():
-    from . import systems as builtin
-
-    for name in builtin.__all__:
-        cls = getattr(builtin, name)
-        meta = meta_of(cls)
-        yield SystemEntry(
-            id=meta.id if meta else name, cls=cls, source="builtin",
-            label=meta.label if meta else name,
-            category=meta.category if meta else "",
-            description=meta.description if meta else (inspect.getdoc(cls) or "").split("\n")[0],
-        )
-
-
-def discover(workspace: str | Path | None = None) -> Registry:
-    """Built-in systems, plus the ``@system`` classes and ``.cir`` netlists found in ``workspace``."""
-    registry = Registry()
-    for entry in _builtin_entries():
-        registry.add(entry)
-    if workspace is None:
-        return registry
-
-    root = Path(workspace).resolve()
-    if not root.is_dir():
-        raise NotADirectoryError(f"workspace is not a directory: {root}")
-    registry.workspace = str(root)
-    purge_user_modules()
-    try:
-        files = find_user_files(root)
-    except Exception as error:  # e.g. malformed pyproject.toml
-        registry.errors.append(_error(root / "pyproject.toml", error))
-        return registry
-    # Python files first: they register the user @device models that netlists use.
-    for path in sorted(files, key=lambda path: path.suffix == ".cir"):
-        if path.suffix == ".cir":
-            try:
-                from .core import NetlistSystem
-
-                cls = type(path.stem, (NetlistSystem,), {}, netlistFile=str(path))
-                system(id=path.stem, label=cls._title or path.stem, category="Netlist",
-                       description=cls._title)(cls)
-                registry.add(SystemEntry(
-                    id=path.stem, cls=cls, source="workspace", label=cls._title or path.stem,
-                    category="Netlist", description=cls._title, file=str(path), line=1,
-                ))
-            except Exception as error:
-                registry.errors.append(_error(path, error))
-            continue
+        folder = Workspace(workspace)
+        if not folder.root.is_dir():
+            raise NotADirectoryError(f"workspace is not a directory: {folder.root}")
+        registry.workspace = str(folder.root)
+        Workspace.purgeModules()
         try:
-            module = import_user_file(path, root)
-            for obj in list(vars(module).values()):
-                if not isinstance(obj, type) or obj.__module__ != module.__name__:
+            files = folder.files()
+        except Exception as error:  # e.g. malformed pyproject.toml
+            registry.recordError(folder.root / "pyproject.toml", error)
+            return registry
+        # Python files first: they register the user @device models that netlists use.
+        for path in sorted(files, key=lambda path: path.suffix == ".cir"):
+            try:
+                if path.suffix == ".cir":
+                    netlistClass = type(path.stem, (NetlistSystem,), {}, netlistFile=str(path))
+                    system(id=path.stem, label=netlistClass._title or path.stem, category="Netlist",
+                           description=netlistClass._title)(netlistClass)
+                    registry.add(SystemEntry(
+                        id=path.stem, cls=netlistClass, source="workspace",
+                        label=netlistClass._title or path.stem, category="Netlist",
+                        description=netlistClass._title, file=str(path), line=1,
+                    ))
                     continue
-                meta = meta_of(obj)
-                if meta is None:
-                    continue
-                registry.add(SystemEntry(
-                    id=meta.id, cls=obj, source="workspace", label=meta.label,
-                    category=meta.category, description=meta.description,
-                    file=meta.file or str(path), line=meta.line,
-                ))
-        except Exception as error:
-            registry.errors.append(_error(path, error))
-    return registry
+                module = folder.importFile(path)
+                for value in list(vars(module).values()):
+                    meta = Meta.of(value) if isinstance(value, type) and value.__module__ == module.__name__ else None
+                    if meta is not None:
+                        registry.add(SystemEntry(
+                            id=meta.id, cls=value, source="workspace", label=meta.label,
+                            category=meta.category, description=meta.description,
+                            file=meta.file or str(path), line=meta.line,
+                        ))
+            except Exception as error:
+                registry.recordError(path, error)
+        return registry
 
 
-def _error(path: Path, error: BaseException) -> dict[str, Any]:
-    line = 0
-    if isinstance(error, SyntaxError) and error.lineno:
-        line = error.lineno
-    else:
-        for frame in reversed(traceback.extract_tb(error.__traceback__)):
-            if Path(frame.filename).resolve() == path.resolve():
-                line = frame.lineno or 0
-                break
-    return {
-        "file": str(path),
-        "line": line,
-        "error": f"{type(error).__name__}: {error}",
-        "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
-    }
+discover = Registry.discover

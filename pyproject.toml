@@ -12,6 +12,7 @@ license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
 authors = [{ name = "Hanchen Ge" }]
 requires-python = ">=3.10"
 dependencies = [
+    "h5py",
     "numpy",
     "scipy",
     "sympy",

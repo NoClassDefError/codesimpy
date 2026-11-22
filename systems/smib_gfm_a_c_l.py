@@ -10,7 +10,8 @@ from ..core import System
 
 class SMIB__GFM_A_C_L(System):
     """SMIB · GFM_A_C_L: virtual admittance + current PI, circular current-reference limit, no terminal
-    capacitor; the grid impedance is embedded in the device (current port)."""
+    capacitor (current port). The grid impedance Rg/Lg is a branch from the PCC to the infinite bus; the PCC has
+    no voltage device and is reduced by RLGrid.localDAEreduction."""
 
     @staticmethod
     def defaultParameters(overrides=None):
@@ -41,7 +42,7 @@ class SMIB__GFM_A_C_L(System):
 
     def __init__(self, p: dict[str, Any]) -> None:
         vsg = GFM_A_C_L(p["Vbase"], p["Sbase"], "vsg")
-        for name in ("Lf", "Rv", "Lv", "Rg", "Lg", "Imax", "Kp", "Kp_cc", "Ki_cc"):
+        for name in ("Lf", "Rv", "Lv", "Imax", "Kp", "Kp_cc", "Ki_cc"):
             vsg.p[name]["num"] = p[name]
 
         source = Infbus(p["Vbase"], p["Sbase"], "grid")
@@ -59,15 +60,13 @@ class SMIB__GFM_A_C_L(System):
             ),
         }
         devices = {
-            "Vdev": [source], "Idev": [vsg],
+            "Vdev": [None, source], "Idev": [vsg, None],
             "vsg": vsg, "source": source,
         }
-        # There is one physical node and no explicit branch. Rg/Lg live in
-        # GFM_A_C_L, including the line-inductor transient, and reconstruct
-        # the converter-side PCC.
+        # PCC (current device only) -- Rg/Lg -- infinite bus.
         network = {
-            "A": np.empty((1, 0)), "R": [], "L": [],
-            "busNames": ["Infinite bus"],
+            "A": np.array([[1.0], [-1.0]]), "R": [p["Rg"]], "L": [p["Lg"]],
+            "busNames": ["PCC", "Infinite bus"],
         }
         base = {
             "Vbase": p["Vbase"], "Sbase": p["Sbase"],
@@ -98,70 +97,3 @@ class SMIB__GFM_A_C_L(System):
         return float(np.sin(
             (state[self.eventStateIndex] - self.parameters["clearAngle_rad"]) / 2
         ))
-
-    def calculateSignals(self, time_s: Any, state: Any, net: dict[str, Any]):
-        time_s, state = np.asarray(time_s), np.asarray(state)
-        signals = self.busSignals(net, [0], 0)
-        vsg = self.devices["vsg"]
-
-        def states(*names):
-            indices = [
-                self.stateNames.index(f"{name}{vsg.index}") for name in names
-            ]
-            return state[:, indices]
-
-        current = states("iLd", "iLq")
-        reference = states("irefd", "irefq")
-        theta = states("theta")[:, 0]
-        delta = states("delta")[:, 0]
-        grid = net["busVoltage"][:, 0]
-        gridD = grid.real * np.cos(theta) + grid.imag * np.sin(theta)
-        gridQ = -grid.real * np.sin(theta) + grid.imag * np.cos(theta)
-        wColumn = self.referenceNames.index(str(vsg.uref[2]))
-        w = net["referenceTrace"][:, wColumn]
-        gridSideD = (
-            gridD + vsg.p["Rg"]["num"] * current[:, 0]
-            - w * vsg.p["Lg"]["num"] * current[:, 1]
-        )
-        gridSideQ = (
-            gridQ + vsg.p["Rg"]["num"] * current[:, 1]
-            + w * vsg.p["Lg"]["num"] * current[:, 0]
-        )
-
-        referenceMagnitude = np.hypot(reference[:, 0], reference[:, 1])
-        limitedReference = reference * np.minimum(
-            1,
-            vsg.p["Imax"]["num"]
-            / np.maximum(referenceMagnitude, np.finfo(float).eps),
-        )[:, None]
-        controllerVoltage = (
-            vsg.p["Kp_cc"]["num"] * (limitedReference - current)
-            + vsg.p["Ki_cc"]["num"] * states("xccd", "xccq")
-        )
-        currentDerivative = (
-            controllerVoltage
-            - 0.5 * np.column_stack((gridSideD, gridSideQ))
-        ) / (vsg.p["Lf"]["num"] + 0.5 * vsg.p["Lg"]["num"])
-        vd = gridSideD + vsg.p["Lg"]["num"] * currentDerivative[:, 0]
-        vq = gridSideQ + vsg.p["Lg"]["num"] * currentDerivative[:, 1]
-        signals.update({
-            "pccVoltage": np.hypot(vd, vq),
-            "gridVoltage": np.abs(grid),
-            "vd": vd,
-            "vq": vq,
-            "activePower": (
-                vd * current[:, 0] + vq * current[:, 1]
-            )[:, None],
-            "reactivePower": (
-                vq * current[:, 0] - vd * current[:, 1]
-            )[:, None],
-            "irefDQ": limitedReference,
-            "filterCurrentMagnitude": np.hypot(
-                current[:, 0], current[:, 1],
-            ),
-            "delta": (delta + np.pi) % (2 * np.pi) - np.pi,
-            "dot_delta": np.zeros_like(delta),
-        })
-        if time_s.size > 1:
-            signals["dot_delta"] = np.gradient(np.unwrap(delta), time_s)
-        return signals

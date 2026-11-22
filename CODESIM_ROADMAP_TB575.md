@@ -184,7 +184,7 @@ What to add (in `core/small_signal_analyzer.py`):
 
 ### 3c. Integration
 - System methods: `scanImpedanceAnalytic(...)` and `scanImpedanceEMT(...)`.
-- A CLI method in `api/cli.py`, and an `impedanceScan` section in `OutputJsonFactory` (Bode and Nyquist data) for the frontend.
+- A CLI method in `api/cli.py`, and an `impedanceScan` section in `OutputMatFactory` (Bode and Nyquist data) for the frontend.
 
 ---
 
@@ -254,7 +254,7 @@ no solution (the nose of the PV curve), and how much reactive margin each bus ha
 
 ### 4e. Integration
 - System methods: `scanPV(direction, ...)`, `scanQV(bus, vRange, ...)` and `voltageStabilityModes(...)`.
-- A CLI method in `api/cli.py`, and a `voltageStability` section in `OutputJsonFactory` (PV and QV
+- A CLI method in `api/cli.py`, and a `voltageStability` section in `OutputMatFactory` (PV and QV
   curves, nose points, margins, participation factors) for the frontend.
 - Unbalanced systems: once the three-phase power flow from part 2, stage 3 exists, CPF runs on it with
   the same structure. Monitor the positive-sequence voltage or the lowest phase voltage.
@@ -312,7 +312,7 @@ So the engine has two levels, built in this order:
 - Threshold events (`eventHandler`, load-shedding relays): evaluate the event function for all members
   at every step and switch each member with a mask. Do not stop the batch.
 - Keep states on the GPU. Decimate on the device and copy chunks to the host only at the output
-  interval, then pass them to `OutputJsonFactory.writeSimulationChunk` as today. For sweeps, compute
+  interval, then pass them to `OutputMatFactory.writeSimulationChunk` as today. For sweeps, compute
   the reduction on the GPU (for example the Fourier extraction of Δv and Δi in 3b), so only the result comes back.
 
 ### 5e. Intra-model parallelism for large networks (later)

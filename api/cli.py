@@ -2,13 +2,17 @@
 
 import argparse
 import json
+import queue
 import sys
+import threading
+import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .. import systems as _systems
+from ..core import System
 from ..registry import discover
 from .output_json_factory import OutputJsonFactory
 
@@ -64,8 +68,25 @@ class CLI:
         cls(arguments.workspace).serve()
 
     def serve(self) -> None:
-        for line in sys.stdin:
-            if not self.running:
+        # stdin is read on its own thread so that "simulation.stop" reaches a running
+        # simulation (it sets System.stopRequest at once; the request itself is answered
+        # in turn, after the simulation returned).
+        lines: queue.Queue[str | None] = queue.Queue()
+
+        def readStdin() -> None:
+            for line in sys.stdin:
+                try:
+                    if json.loads(line).get("method") == "simulation.stop":
+                        System.stopRequest.set()
+                except (ValueError, AttributeError):
+                    pass  # reported when the line is dispatched
+                lines.put(line)
+            lines.put(None)
+
+        threading.Thread(target=readStdin, name="stdin", daemon=True).start()
+        while self.running:
+            line = lines.get()
+            if line is None:
                 break
             request = None
             try:
@@ -102,13 +123,22 @@ class CLI:
         elif method == "model.reset":
             self.resetModel()
             self.outputJsonFactory.writeResponse(requestId, {"reset": True})
+        elif method == "layout.save":
+            if self.system is None:
+                raise RuntimeError("load a system before saving its layout")
+            snapshotFile, _ = self.system.outputMatFactory.saveSnapshot(layout=params["layout"])
+            self.outputJsonFactory.writeResponse(requestId, {"snapshotFile": str(snapshotFile)})
+        elif method == "simulation.stop":
+            self.outputJsonFactory.writeResponse(requestId, {"stopped": True})
         elif method == "simulation.start":
+            System.stopRequest.clear()
             self.runSimulation(requestId, params)
         elif method == "smallSignal.run":
             self.runSmallSignal(requestId, params)
         elif method == "interaction.run":
             self.runInteraction(requestId, params)
         elif method == "rms.run":
+            System.stopRequest.clear()
             self.runRMS(requestId, params)
         elif method == "server.shutdown":
             self.outputJsonFactory.writeResponse(requestId, {"shutdown": True})
@@ -159,13 +189,24 @@ class CLI:
                 name: value for name, value in modelOptions.items()
                 if value is not None
             })
-            self.system = systemClass(self.parameters)
-            self.system.outputJsonFactory.preserveExisting = True
+            # Build warnings (e.g. reduced buses) only reach stderr otherwise; send them to the
+            # extension, which shows them as notifications.
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                self.system = systemClass(self.parameters)
+            for warning in caught:
+                print(f"warning: {warning.message}", file=sys.stderr, flush=True)
+            if caught:
+                self.outputJsonFactory.writeEvent(
+                    "model.warnings", None, systemName=systemName,
+                    warnings=[str(warning.message) for warning in caught],
+                )
+            self.system.outputMatFactory.preserveExisting = True
             self.applyOutputDirectory()
             self.systemName = systemName
             self.modelKey = modelKey
             self.operatingPoint = None
-        return self.system.outputJsonFactory.saveSnapshot() if saveSnapshot else (None, None)
+        return self.system.outputMatFactory.saveSnapshot() if saveSnapshot else (None, None)
 
     def responseDescriptor(self, descriptor: Any) -> Any:
         """Leave out heavy descriptor parts the extension already holds unchanged.
@@ -222,7 +263,7 @@ class CLI:
         """
         directory = outputDirectory(self.registry.workspace)
         if self.system is not None and directory is not None:
-            self.system.outputJsonFactory.outputDirectory = directory
+            self.system.outputMatFactory.outputDirectory = directory
 
     def getOperatingPoint(self):
         if self.operatingPoint is None:
@@ -266,7 +307,7 @@ class CLI:
                 saveSnapshot=False,
             )
             simulation["initialization"] = operatingPoint["initialization"]
-            snapshotFile, descriptor = self.system.outputJsonFactory.saveSnapshot(simulation)
+            snapshotFile, descriptor = self.system.outputMatFactory.saveSnapshot(simulation)
             self.outputJsonFactory.writeEvent(
                 "simulation.completed", requestId,
                 systemName=self.systemName,
@@ -280,7 +321,7 @@ class CLI:
     def runSmallSignal(self, requestId: Any, params: dict[str, Any]) -> None:
         self.loadModel(params, saveSnapshot=False)
         analysis = self.system.smallSignal.analyze(self.getOperatingPoint())
-        snapshotFile, descriptor = self.system.outputJsonFactory.saveSnapshot()
+        snapshotFile, descriptor = self.system.outputMatFactory.saveSnapshot()
         self.outputJsonFactory.writeResponse(requestId, {
             "descriptor": self.responseDescriptor(descriptor),
             "snapshotFile": str(snapshotFile),
@@ -291,7 +332,7 @@ class CLI:
         self.loadModel(params, saveSnapshot=False)
         self.system.smallSignal.analyze(self.getOperatingPoint())
         self.runInteractionAnalysis(params)
-        snapshotFile, descriptor = self.system.outputJsonFactory.saveSnapshot()
+        snapshotFile, descriptor = self.system.outputMatFactory.saveSnapshot()
         self.outputJsonFactory.writeResponse(requestId, {
             "descriptor": self.responseDescriptor(descriptor), "snapshotFile": str(snapshotFile),
         })
@@ -330,8 +371,10 @@ class CLI:
             if not cutoff_Hz > 0:
                 raise ValueError("cutoff_Hz must be positive")
             corrected = self.system.correctRMS(rms, cutoff_Hz=cutoff_Hz)
+        self.system.outputMatFactory.latestRMSResult = rms
+        self.system.outputMatFactory.latestRMSCorrected = corrected
         factory.latestRMS = factory.serializeRMS(rms, corrected)
-        snapshotFile, descriptor = factory.saveSnapshot()
+        snapshotFile, descriptor = self.system.outputMatFactory.saveSnapshot()
         self.outputJsonFactory.writeResponse(requestId, {
             "descriptor": self.responseDescriptor(descriptor), "snapshotFile": str(snapshotFile),
         })
@@ -342,6 +385,7 @@ class CLI:
         ``maskedIndices`` (one-based modal rows, columns) gives the reduced eigenvalues."""
         params = params or {}
         analysis = self.system.smallSignal.interactionAnalysis(params.get("maskedIndices"))
+        self.system.outputMatFactory.latestInteractionResult = analysis
         self.system.outputJsonFactory.latestInteractionAnalysis = (
             self.system.outputJsonFactory.serializeInteractionAnalysis(analysis)
         )

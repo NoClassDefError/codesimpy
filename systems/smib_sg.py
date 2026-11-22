@@ -47,10 +47,3 @@ class SMIB__SG(System):
                          {"Vbase": p["Vbase"], "Sbase": p["Sbase"], "frequency_Hz": p["frequency_Hz"]}, refs)
         self.solverSettings.update({"max_step": 0.1 / (2 * np.pi * p["frequency_Hz"]), "rtol": 1e-4, "atol": 1e-6})
         self.parameters, self.parameterNames = p, list(p)
-
-    def calculateSignals(self, time_s, state, networkSignals):
-        signals = self.busSignals(networkSignals, np.arange(self.rlGrid.n), self.rlGrid.n - 1)
-        idx = [self.stateNames.index(str(symbol)) for symbol in self.devices["sg"].x]
-        signals["lineCurrentMagnitude"] = np.abs(networkSignals["branchCurrent"])
-        signals["sgSpeed"] = np.asarray(state)[:, idx[7]]
-        return signals

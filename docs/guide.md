@@ -2,28 +2,28 @@
 title: Building a component and a system
 ---
 
-How a device model (`Device`) and a study (`System`) are written, step by step, using the existing grid-forming converter `GFM_A_C_L` and its system `SMIB__GFM_A_C_L`.
+How a device model (`Device`) and a study (a SPICE netlist, `.cir`) are written, step by step, using the existing grid-forming converter `GFM_A_C_L` on an infinite bus.
 
 (guide-overview)=
 ## 1. Overview
 
-CodeSim models a power network as **devices** (converters, machines, sources, capacitors) connected by an **RL network**. You write two classes:
+CodeSim models a power network as **devices** (converters, machines, sources, capacitors) connected by an **RL network**. You write two things:
 
 :::{list-table}
 :header-rows: 1
 
-* - Class
-  - Base class
+* - What
+  - Written as
   - Contains
   - Registration
 * - Component
-  - `Device`
+  - a Python class derived from `Device`
   - the equations of one device
-  - none: a system imports and creates it
+  - none for built-in components; `@device` for your own
 * - System
-  - `System`
-  - one study: devices on buses, network, references, parameters, output signals
-  - the `@system` decorator
+  - a SPICE netlist (`.cir`)
+  - one study: devices on buses, network, references, parameters, events, output signals
+  - none: every `.cir` file in the workspace is a system
 :::
 
 Initialization, EMT and RMS simulation, small-signal and interaction analysis and the VS Code integration then work without further code.
@@ -33,7 +33,7 @@ Initialization, EMT and RMS simulation, small-signal and interaction analysis an
 
 - **Per unit and time.** Each device writes its equations in per unit of its own base $(V_b, S_b)$. Derivatives are with respect to $\tau=\omega_b t$, $\omega_b=2\pi f$, so inductances and capacitances are per-unit reactances and susceptances. Times you pass in (simulation time, breakpoints, references) are in seconds.
 - **Frames.** Device ports and the network use the stationary $\alpha\beta$ frame. Inside a device you work in its own rotating $dq$ frame, whose angle $\theta$ is a state ([component step 4](#guide-c-theta)). With $\bm R(\theta)=\begin{bmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{bmatrix}$ and $\bm J=\begin{bmatrix}0&-1\\1&0\end{bmatrix}$, a port vector is rotated in as $\bm x_{dq}=\bm R(\theta)^{\top}\bm x_{\alpha\beta}$ and out as $\bm x_{\alpha\beta}=\bm R(\theta)\,\bm x_{dq}$; $\omega L\bm J\bm i$ is the speed voltage of an inductor in $dq$.
-- **Buses and ports.** Bus $i$ has one **voltage port** `Vdev[i]`, which sets the bus voltage, and one **current port** `Idev[i]`, which injects a current. An unused current port is filled with `ZeroCurrent`; a bus with only a current device gets its line `Capacitor` as voltage port.
+- **Buses and ports.** Bus $i$ has one **voltage port** `Vdev[i]`, which sets the bus voltage, and one **current port** `Idev[i]`, which injects a current. An unused current port is filled with `ZeroCurrent`; a bus without a voltage port is removed from the model exactly ({ref}`guide-reduction`).
 
 :::{list-table}
 :header-rows: 1
@@ -99,10 +99,6 @@ Without a terminal capacitor the converter's terminal is an inductor, so it is a
   - `Lf, Rv, Lv`
   - parameters
   - filter inductor, virtual impedance
-* - $R_g, L_g$
-  - `Rg, Lg`
-  - parameters
-  - embedded grid branch
 * - $I_{max}, K_p, K_{pc}, K_{ic}$
   - `Imax, Kp, Kp_cc, Ki_cc`
   - parameters
@@ -114,7 +110,7 @@ The control structure (all vectors in the device $dq$ frame):
 :::{figure} figures/gfm-a-c-l-control.png
 :alt: Circuit and control diagram of GFM_A_C_L
 
-Top: the bridge voltage $\bm v^{*}$ drives the filter $L_f$; the terminal voltage $\bm v_t$ connects through the grid branch $R_g+jL_g$ to the grid voltage $\bm v_g$. Without a terminal capacitor $\bm i_g=\bm i_L$. Bottom: the droop (APC) sets the angle $\delta$ of the internal voltage $\bm v_s$ of magnitude $V_{ref}$ ($V$ in the figure); the voltage difference $\bm e=\bm v_s-\bm v_t$ drives the virtual admittance $\bm Z_v^{-1}(s)$ to give $\bm i_u$, the circular limiter gives $\bm i_{ref}$, and the current loop gives $\bm v^{*}$.
+Top: the bridge voltage $\bm v^{*}$ drives the filter $L_f$; the terminal voltage $\bm v_t$ (the port voltage) connects through the grid branch $R_g+jL_g$, a branch of the network, to the grid voltage $\bm v_g$. Without a terminal capacitor $\bm i_g=\bm i_L$. Bottom: the droop (APC) sets the angle $\delta$ of the internal voltage $\bm v_s$ of magnitude $V_{ref}$ ($V$ in the figure); the voltage difference $\bm e=\bm v_s-\bm v_t$ drives the virtual admittance $\bm Z_v^{-1}(s)$ to give $\bm i_u$, the circular limiter gives $\bm i_{ref}$, and the current loop gives $\bm v^{*}$.
 :::
 
 (guide-c-constructor)=
@@ -125,14 +121,13 @@ Subclass `Device` and pass the port type, the parameters with their defaults (pe
 ```{code} python
 :caption: class and constructor
 class GFM_A_C_L(Device):
-    """GFM · A: virtual admittance + current PI · C: circular limit on the current reference · L: no terminal capacitor (current port; the grid branch Rg/Lg is in the device)."""
+    """GFM · A: virtual admittance + current PI · C: circular limit on the current reference · L: no terminal capacitor (current port; the port voltage is the PCC voltage)."""
 
     def __init__(self, Vb: float, Sb: float, index: str) -> None:
         super().__init__(
             Vb, Sb, "Current", index,
             {
                 "Lf": 0.07, "Rv": 0.1, "Lv": 0.01,
-                "Rg": 0.0, "Lg": 0.0,
                 "Imax": 1.5, "Kp": 0.05,
                 "Kp_cc": 20.0, "Ki_cc": 5.0,
             },
@@ -142,7 +137,7 @@ class GFM_A_C_L(Device):
         )
 ```
 
-`Device.__init__` creates the symbols, suffixed with the device index: `self.x` (states), `self.u` (port input, here the bus voltage $\bm v_{\alpha\beta}$), `self.uref` (references) and `self.p[name]["sym"]` (parameters; the value is in `self.p[name]["num"]`). It then calls `getStateAndOutputEquationsSym` (step 3) once and stores `f` and `g`.
+`Device.__init__` creates the symbols, suffixed with the device index: `self.x` (states), `self.u` (port input, here the terminal voltage $\bm v_{\alpha\beta}$), `self.uref` (references) and `self.p[name]["sym"]` (parameters; the value is in `self.p[name]["num"]`). It then calls `getStateAndOutputEquationsSym` (step 3) once and stores `f` and `g`.
 
 (guide-c-equations)=
 ### Step 3 — State and output equations
@@ -161,7 +156,7 @@ def getStateAndOutputEquationsSym(self):
     xcc = sp.Matrix(self.x[4:6])
     delta, theta = self.x[6:8]
     Pref, Vref, w = self.uref
-    gridVoltageStationary = sp.Matrix(self.u)
+    pccVoltageStationary = sp.Matrix(self.u)
 
     p = lambda name: self.p[name]["sym"]
     J = sp.Matrix([[0, -1], [1, 0]])
@@ -171,30 +166,15 @@ def getStateAndOutputEquationsSym(self):
     ])
 ```
 
-#### 3b. Port voltage and the embedded grid branch
+#### 3b. Port voltage
 
-The port voltage (the infinite bus) is rotated into the frame. Filter and grid carry the same current $\bm i_L$, so the terminal voltage $\bm v_t$ follows from the grid branch:
-
-$$
-\begin{aligned}
-\bm v_g &= \bm R(\theta)^{\top}\bm v_{\alpha\beta}\\
-\bm v_t &= \bm v_g+R_g\,\bm i_L+\omega L_g\bm J\,\bm i_L+L_g\,\frac{d\bm i_L}{d\tau}
-\end{aligned}
-$$
-
-The code computes the first three terms here (`gridSideDrop`); the $L_g\,d\bm i_L/d\tau$ term is added in 3d, once $d\bm i_L/d\tau$ is known.
+The port voltage is the terminal (PCC) voltage, rotated into the frame: $\bm v_t=\bm R(\theta)^{\top}\bm v_{\alpha\beta}$. The device contains no grid impedance. When the PCC has no capacitor, the grid branch $R_g+jL_g$ is a branch of the network and RLGrid removes the PCC exactly with its KCL ({ref}`guide-reduction`).
 
 ```{code} python
 :caption: getStateAndOutputEquationsSym — port voltage
-# The external voltage port is the infinite bus. With no PCC
-# capacitor, the filter and grid current are identical, so the grid
-# inductor can be eliminated exactly and embedded in this current
-# device.
-gridVoltage = rotation.T * gridVoltageStationary
-gridSideDrop = (
-    gridVoltage + p("Rg") * current
-    + w * p("Lg") * J * current
-)
+# The port voltage is the PCC voltage. A grid branch behind a PCC without a
+# capacitor is handled by the network (RLGrid.localDAEreduction).
+pccVoltage = rotation.T * pccVoltageStationary
 ```
 
 #### 3c. Circular current limit
@@ -226,7 +206,11 @@ K &= 0.5
 \end{aligned}
 $$
 
-The integral part is the state $\bm x_{cc}$ (`xccd, xccq`). The code puts $\bm v^{*}$ into the filter inductor and, because $\bm v_t$ contains $L_g\,d\bm i_L/d\tau$ (3b), solves for $d\bm i_L/d\tau$ (`dcurrent`) before completing $\bm v_t$.
+The integral part is the state $\bm x_{cc}$ (`xccd, xccq`). With $\bm v^{*}$ in the filter inductor, $L_f\,d\bm i_L/d\tau = \bm v^{*}-\bm v_t-\omega L_f\bm J\,\bm i_L$, so the speed voltages cancel:
+
+$$
+L_f\,\frac{d\bm i_L}{d\tau}=\left(K_{pc}+\frac{K_{ic}}{s}\right)\left(\bm i_{ref}-\bm i_L\right)-(1-K)\,\bm v_t
+$$
 
 ```{code} python
 :caption: getStateAndOutputEquationsSym — current loop
@@ -234,11 +218,11 @@ currentError = limitedReference - current
 controllerVoltage = (
     p("Kp_cc") * currentError + p("Ki_cc") * xcc
 )
-dcurrent = (
-    controllerVoltage - gridSideDrop / 2
-) / (p("Lf") + p("Lg") / 2)
-pccVoltage = gridSideDrop + p("Lg") * dcurrent
+# Converter voltage = controller output + half of the PCC voltage (feedforward).
+dcurrent = (controllerVoltage - pccVoltage / 2) / p("Lf")
 ```
+
+These equations are linear in the port voltage $\bm v_t$. That is what lets RLGrid remove a PCC without capacitor exactly: with the grid branch, $\bm v_t=\bm v_g+R_g\bm i+L_g\,d\bm i/d\tau$ and $d\bm i/d\tau$ depends linearly on $\bm v_t$, which gives the effective inductance $L_f+L_g/2$.
 
 #### 3e. Droop and virtual admittance
 
@@ -360,7 +344,7 @@ Initialization first solves a power flow in the bus voltage $V$, the bus angle a
 
 $$
 \begin{aligned}
-\bm v_t &= \begin{bmatrix}V\\0\end{bmatrix}+(R_g\bm I+\omega L_g\bm J)\,\bm i_L\\
+\bm v_t &= \begin{bmatrix}V\\0\end{bmatrix}\\
 \bm v_s &= \bm v_t+(R_v\bm I+\omega L_v\bm J)\,\bm i_L\\
 0 &= P_{ref}-\bm v_t\cdot\bm i_L\\
 0 &= |\bm v_s|^2-V_{ref}^2
@@ -374,10 +358,7 @@ def getPowerFlowEquations(self, V, theta, P, Q):
     w = self.uref[2]
     current = sp.Matrix([P / V, -Q / V])
     J = sp.Matrix([[0, -1], [1, 0]])
-    pccVoltage = (
-        sp.Matrix([V, 0]) + self.p["Rg"]["num"] * current
-        + w * self.p["Lg"]["num"] * J * current
-    )
+    pccVoltage = sp.Matrix([V, 0])
     internalVoltage = (
         pccVoltage + self.p["Rv"]["num"] * current
         + w * self.p["Lv"]["num"] * J * current
@@ -410,10 +391,7 @@ def initFromPowerFlow(self, V, theta, P, Q):
     w = 1.0
     current = np.array([P / V, -Q / V])
     J = np.array([[0.0, -1.0], [1.0, 0.0]])
-    pccVoltage = (
-        np.array([V, 0.0]) + self.p["Rg"]["num"] * current
-        + w * self.p["Lg"]["num"] * J @ current
-    )
+    pccVoltage = np.array([V, 0.0])
     internalVoltage = (
         pccVoltage + self.p["Rv"]["num"] * current
         + w * self.p["Lv"]["num"] * J @ current
@@ -421,6 +399,27 @@ def initFromPowerFlow(self, V, theta, P, Q):
     xcc = 0.5 * pccVoltage / self.p["Ki_cc"]["num"]
     delta = np.arctan2(internalVoltage[1], internalVoltage[0])
     return np.r_[current, current, xcc, delta, theta]
+```
+
+(guide-c-signals)=
+### Step 7 — Output signals (optional)
+
+Every system already returns the bus signals (|V|, angle, P, Q, line currents) and all states. Return from `calculateSignals` only what is neither: here the terminal voltage and its power, because the PCC may be a bus without a voltage device. `x` has one row per time sample and the device's states as columns, `u` is the port input in $\alpha\beta$ on the device base (the terminal voltage of a current-port device), `uref` the references. The values are on the device base; the frontend shows them under the component.
+
+```{code} python
+:caption: calculateSignals
+def calculateSignals(self, time_s, x, u, uref):
+    """Terminal (PCC) voltage and its power: the PCC may be a bus without a voltage device."""
+    x, u = np.asarray(x), np.asarray(u)
+    current, theta = x[:, 2:4], x[:, 7]
+    cos, sin = np.cos(theta), np.sin(theta)
+    vd = cos * u[:, 0] + sin * u[:, 1]
+    vq = -sin * u[:, 0] + cos * u[:, 1]
+    return {
+        "pccVoltage": np.hypot(vd, vq),
+        "activePower": vd * current[:, 0] + vq * current[:, 1],
+        "reactivePower": vq * current[:, 0] - vd * current[:, 1],
+    }
 ```
 
 :::{note}
@@ -439,7 +438,7 @@ from ..core import Device
 
 
 class GFM_A_C_L(Device):
-    """GFM · A: virtual admittance + current PI · C: circular limit on the current reference · L: no terminal capacitor (current port; the grid branch Rg/Lg is in the device)."""
+    """GFM · A: virtual admittance + current PI · C: circular limit on the current reference · L: no terminal capacitor (current port; the port voltage is the PCC voltage)."""
     thetaIndices = (7,)
     rmsDynamicIndices = (6,)  # delta
 
@@ -448,7 +447,6 @@ class GFM_A_C_L(Device):
             Vb, Sb, "Current", index,
             {
                 "Lf": 0.07, "Rv": 0.1, "Lv": 0.01,
-                "Rg": 0.0, "Lg": 0.0,
                 "Imax": 1.5, "Kp": 0.05,
                 "Kp_cc": 20.0, "Ki_cc": 5.0,
             },
@@ -463,7 +461,7 @@ class GFM_A_C_L(Device):
         xcc = sp.Matrix(self.x[4:6])
         delta, theta = self.x[6:8]
         Pref, Vref, w = self.uref
-        gridVoltageStationary = sp.Matrix(self.u)
+        pccVoltageStationary = sp.Matrix(self.u)
 
         p = lambda name: self.p[name]["sym"]
         J = sp.Matrix([[0, -1], [1, 0]])
@@ -472,15 +470,9 @@ class GFM_A_C_L(Device):
             [sp.sin(theta), sp.cos(theta)],
         ])
 
-        # The external voltage port is the infinite bus. With no PCC
-        # capacitor, the filter and grid current are identical, so the grid
-        # inductor can be eliminated exactly and embedded in this current
-        # device.
-        gridVoltage = rotation.T * gridVoltageStationary
-        gridSideDrop = (
-            gridVoltage + p("Rg") * current
-            + w * p("Lg") * J * current
-        )
+        # The port voltage is the PCC voltage. A grid branch behind a PCC without a
+        # capacitor is handled by the network (RLGrid.localDAEreduction).
+        pccVoltage = rotation.T * pccVoltageStationary
 
         squaredMagnitude = iref.dot(iref)
         denominator = sp.sqrt((
@@ -492,10 +484,8 @@ class GFM_A_C_L(Device):
         controllerVoltage = (
             p("Kp_cc") * currentError + p("Ki_cc") * xcc
         )
-        dcurrent = (
-            controllerVoltage - gridSideDrop / 2
-        ) / (p("Lf") + p("Lg") / 2)
-        pccVoltage = gridSideDrop + p("Lg") * dcurrent
+        # Converter voltage = controller output + half of the PCC voltage (feedforward).
+        dcurrent = (controllerVoltage - pccVoltage / 2) / p("Lf")
 
         internalVoltage = Vref * sp.Matrix([
             sp.cos(delta), sp.sin(delta),
@@ -520,10 +510,7 @@ class GFM_A_C_L(Device):
         w = self.uref[2]
         current = sp.Matrix([P / V, -Q / V])
         J = sp.Matrix([[0, -1], [1, 0]])
-        pccVoltage = (
-            sp.Matrix([V, 0]) + self.p["Rg"]["num"] * current
-            + w * self.p["Lg"]["num"] * J * current
-        )
+        pccVoltage = sp.Matrix([V, 0])
         internalVoltage = (
             pccVoltage + self.p["Rv"]["num"] * current
             + w * self.p["Lv"]["num"] * J * current
@@ -537,10 +524,7 @@ class GFM_A_C_L(Device):
         w = 1.0
         current = np.array([P / V, -Q / V])
         J = np.array([[0.0, -1.0], [1.0, 0.0]])
-        pccVoltage = (
-            np.array([V, 0.0]) + self.p["Rg"]["num"] * current
-            + w * self.p["Lg"]["num"] * J @ current
-        )
+        pccVoltage = np.array([V, 0.0])
         internalVoltage = (
             pccVoltage + self.p["Rv"]["num"] * current
             + w * self.p["Lv"]["num"] * J @ current
@@ -548,473 +532,177 @@ class GFM_A_C_L(Device):
         delta = np.arctan2(internalVoltage[1], internalVoltage[0])
         xcc = 0.5 * pccVoltage / self.p["Ki_cc"]["num"]
         return np.r_[current, current, xcc, delta, theta]
+
+    def calculateSignals(self, time_s, x, u, uref):
+        """Terminal (PCC) voltage and its power: the PCC may be a bus without a voltage device."""
+        x, u = np.asarray(x), np.asarray(u)
+        current, theta = x[:, 2:4], x[:, 7]
+        cos, sin = np.cos(theta), np.sin(theta)
+        vd = cos * u[:, 0] + sin * u[:, 1]
+        vq = -sin * u[:, 0] + cos * u[:, 1]
+        return {
+            "pccVoltage": np.hypot(vd, vq),
+            "activePower": vd * current[:, 0] + vq * current[:, 1],
+            "reactivePower": vq * current[:, 0] - vd * current[:, 1],
+        }
 ```
 ::::
 
-(guide-system)=
+(guide-netlist)=
 ## 4. Write a system
 
-The example is `SMIB__GFM_A_C_L` (`codesimpy/systems/smib_gfm_a_c_l.py`): `GFM_A_C_L` on an infinite bus. The grid branch is inside the device, so the network has a single bus and no branch.
+A system is one study: devices on buses, the network between them, references, simulation settings and output signals. Write it as a SPICE netlist (`.cir`): every `.cir` file in your workspace is a system, with no Python code and no registration. `NetlistSystem` builds the network, devices, references, the event and the output signals from it.
+
+The example is the built-in `SMIB_NL__GFM_A_C_L` (`codesimpy/systems/SMIB_NL__GFM_A_C_L.cir`): `GFM_A_C_L` on an infinite bus through the grid branch $R_g+jL_g$, with a voltage dip at the infinite bus. The PCC has no capacitor; RLGrid removes it exactly ({ref}`guide-reduction`).
 
 :::{figure} figures/smib-gfm-a-c-l-circuit.svg
-:alt: Circuit of SMIB__GFM_A_C_L
+:alt: Circuit of the SMIB study
 
-One bus: the infinite bus is its voltage port, the converter its current port. The filter $L_f$ and the grid branch $R_g+jL_g$ are inside `GFM_A_C_L`; the terminal voltage $\bm v_t$ between them is reconstructed from the grid branch (component step 3b).
+The converter injects its current at the PCC, which is joined to the infinite bus by the grid branch $R_g+jL_g$.
 :::
 
-(guide-s-file)=
-### Step 1 — File, imports and the `@system` annotation
+(guide-n-file)=
+### Step 1 — File and title
 
-Your own system lives in a `.py` file in your VS Code workspace. Mark the class with `@system`: the backend imports every workspace file that uses it and lists the class in the system dropdown.
+Create `my_smib.cir` in your workspace. In VS Code, the {kbd}`New netlist` button in the topology toolbar (or *CodeSim: New Netlist System* in the explorer context menu) creates a template. The first line is always the title, shown in the system dropdown; the file name is the system id. Lines starting with `*` are comments.
 
-```{code} python
-:caption: my_smib.py (in your workspace)
-"""My SMIB: GFM_A_C_L on an infinite bus, the grid impedance embedded in the device."""
-
-from typing import Any
-
-import numpy as np
-
-from codesimpy import System, system
-from codesimpy.components import GFM_A_C_L, Infbus
-
-@system(id="MySMIB_GFM", label="My SMIB · GFM_A_C_L", category="SMIB")
-class MySMIB_GFM(System):
-    """GFM_A_C_L on an infinite bus, the grid impedance embedded in the device."""
-    ...
+```{code} spice
+:caption: my_smib.cir — title
+SMIB · GFM_A_C_L (netlist)
+* GFM_A_C_L on an infinite bus through the grid branch Rg + jLg.
 ```
 
-:::{list-table}
-:header-rows: 1
+(guide-n-params)=
+### Step 2 — System base and parameters
 
-* - Argument
-  - Meaning
-  - Default
-* - `id`
-  - unique name of the system among all systems
-  - class name
-* - `label`
-  - name shown in the dropdown
-  - `id`
-* - `category`
-  - group in the dropdown
-  - none
-* - `description`
-  - one-line description
-  - first line of the class docstring
-:::
+`.options` sets the system base: power `sbase` (VA), line-line voltage `vbase` (V), frequency `freq` (Hz), and with `units=pu` all R, L and C values are per unit on that base (L and C as reactance and susceptance). `.param` defines named values; they appear in the VS Code parameter editor, and every expression in `{...}` that uses them is re-evaluated when you edit them. A `+` line continues the previous card.
 
-- The decorator is not inherited: a subclass of a decorated system needs its own `@system`.
-- Keep the first line of the docstring a complete sentence; it becomes the description.
-- Built-in systems inside the `codesimpy` package (like `SMIB__GFM_A_C_L`) are listed in `__all__` of `codesimpy/systems/__init__.py` instead, and use relative imports (`from ..components import …`).
+```{code} spice
+:caption: my_smib.cir — base and parameters
+.options sbase=8100 freq=50 units=pu
+.param SCR=2 rho=0.1 faultVoltage=0.5
++ faultStart_s=0.2 faultComplete_s=0.201 recoveryStart_s=1 recoveryComplete_s=1.001
+```
 
-The steps below show the body of `SMIB__GFM_A_C_L`; it is the same in your file.
+(guide-n-devices)=
+### Step 3 — Devices
 
-(guide-s-params)=
-### Step 2 — Default parameters
+`Xname n+ 0 Model par=value ...` places a device between bus `n+` and ground. `Model` is a class of `codesimpy.components` (`GFM_A_C_L`, `GFL_C_F_L`, `GFM_A_C_LC`, `SG`, `Infbus`, ...) or a `@device` class of your own ({ref}`guide-n-reference`). After it come:
 
-`defaultParameters` returns every parameter. VS Code passes the values a user edits as `overrides`, so derived values are computed after them. The grid impedance follows from the short-circuit ratio and $\rho=R/X$:
+- device parameters: any entry of the device's `p` (here `Lf`, `Rv`, ...); omitted ones keep the device default;
+- references: every entry of the device's `uref`, without the index suffix (`Pref`, not `Pref_xvsg`). They are required.
+
+The device index is its lower-case name, so the converter's states are `delta_xvsg`, `theta_xvsg`, ...
+
+```{code} spice
+:caption: my_smib.cir — converter
+* Converter at the PCC (no capacitor: the PCC is reduced exactly).
+Xvsg pcc 0 GFM_A_C_L Lf=0.07 Rv=0.05 Lv=0.01 Imax=1.5 Kp=0.05 Kp_cc=20 Ki_cc=5
++ Pref=1 Vref=1.1 wref=1
+```
+
+A bus takes at most one voltage-port device (`Infbus`, `GFM_A_C_LC`, or a `C` card, which becomes a `Capacitor`) and any number of current-port devices ({ref}`guide-concepts`).
+
+(guide-n-network)=
+### Step 4 — Network
+
+Branches are series R, L cards between two buses. `Lname n1 n2 L R=r` is one series RL branch; a plain `R` and a plain `L` card on the same node pair are merged into one branch as well. Expressions make the branch follow the parameters: with $\rho=R/X$,
 
 $$
 L_g=\frac{1}{\mathrm{SCR}\,\sqrt{1+\rho^2}},\qquad R_g=\rho\,L_g\qquad\text{(pu)}
 $$
 
-```{code} python
-:caption: defaultParameters
-@staticmethod
-def defaultParameters(overrides=None):
-    p = {
-        "Vbase": 1, "Sbase": 8100, "frequency_Hz": 50,
-        "SCR": 2, "rho": 0.1,
-        "Pref": 1, "Vref": 1.1, "wref": 1,
-        "Lf": 0.07, "Rv": 0.05, "Lv": 0.01,
-        "Imax": 1.5, "Kp": 0.05, "Kp_cc": 20, "Ki_cc": 5,
-        "clearMode": "time", "clearAngle_rad": -np.pi / 3,
-        "faultStart_s": 0.2, "faultComplete_s": 0.201,
-        "minimumFaultDuration_s": 0.5, "recoveryStart_s": 1,
-        "recoveryComplete_s": 1.001, "faultVoltage": 0.5,
-        "validationTime_s": 2, "outputStep_s": 1e-4,
-        "residualTolerance": 1e-4, "clearingState": "delta",
-    }
-    p.update(overrides or {})
-    p["wBase"] = 2 * np.pi * p["frequency_Hz"]
-    p["Lg"] = 1 / (p["SCR"] * np.sqrt(1 + p["rho"]**2))
-    p["Rg"] = p["rho"] * p["Lg"]
-    p["breakpoints_s"] = [p["faultStart_s"], p["faultComplete_s"]]
-    p["breakpoints_s"] += (
-        [p["recoveryStart_s"], p["recoveryComplete_s"]]
-        if p["clearMode"] == "time"
-        else [p["faultStart_s"] + p["minimumFaultDuration_s"]]
-    )
-    return p
+```{code} spice
+:caption: my_smib.cir — grid branch
+* Grid branch: one card for the series R and L.
+Lgrid pcc inf {1/(SCR*sqrt(1+rho^2))} R={rho/(SCR*sqrt(1+rho^2))}
 ```
 
-- VS Code needs `validationTime_s` (end time), `outputStep_s`, `residualTolerance` and `breakpoints_s`.
-- `breakpoints_s` are the times where a reference changes; the solver restarts there. With angle-based clearing the recovery time is not known in advance, so only the earliest clearing time is listed.
+`L = 0` (a purely resistive branch) is allowed, except between two buses that both have a voltage device. A bus with no voltage device, such as `pcc` here, is removed from the model exactly ({ref}`guide-reduction`); `V(pcc)`, `P(pcc)` and the branch currents remain available as signals.
 
-(guide-s-devices)=
-### Step 3 — Create the devices
+(guide-n-references)=
+### Step 5 — References that change in time
 
-Create each device with a unique index (`"vsg"`, `"grid"`) and set its system-specific parameters through `device.p[name]["num"]` before the model is built.
+Any reference can be a piecewise-linear waveform `PWL(t1 v1 t2 v2 ...)`, times in seconds. The infinite-bus magnitude `Aref` ramps down to `faultVoltage` between `faultStart_s` and `faultComplete_s` and back up between `recoveryStart_s` and `recoveryComplete_s`. The PWL times become solver breakpoints automatically.
 
-```{code} python
-:caption: __init__ — devices
-def __init__(self, p: dict[str, Any]) -> None:
-    vsg = GFM_A_C_L(p["Vbase"], p["Sbase"], "vsg")
-    for name in ("Lf", "Rv", "Lv", "Rg", "Lg", "Imax", "Kp", "Kp_cc", "Ki_cc"):
-        vsg.p[name]["num"] = p[name]
-
-    source = Infbus(p["Vbase"], p["Sbase"], "grid")
+```{code} spice
+:caption: my_smib.cir — infinite bus
+* Infinite bus with a voltage dip from faultStart_s to recoveryStart_s.
+Xgrid inf 0 Infbus
++ Aref=PWL(0 1 {faultStart_s} 1 {faultComplete_s} {faultVoltage} {recoveryStart_s} {faultVoltage} {recoveryComplete_s} 1)
 ```
 
-(guide-s-references)=
-### Step 4 — References
+(guide-n-tran)=
+### Step 6 — Simulation settings
 
-Every device reference gets a value, keyed by its symbol name `str(device.uref[k])`: a number or a function of time in seconds. The infinite-bus magnitude $A_{ref}(t)$ is the fault profile: a ramp down to $V_f$ at the fault and back up at the clearing time $t_c$ (`self.eventTime_s`):
+`.tran tstep tstop [0 [tmax]]` sets the output step, the end time and optionally the maximum solver step. `.options reltol= abstol= method=` set the solver.
+
+```{code} spice
+:caption: my_smib.cir — simulation
+.tran 0.1m 2
+.options reltol=1e-6 abstol=1e-9
+```
+
+(guide-n-signals)=
+### Step 7 — Output signals
+
+Bus voltages, angles and powers of every bus with a voltage device, and the signals each device defines (component step 7), are always output. `.probe` adds your own, as `name=par('expr')` or a plain function such as `vm(pcc)`. Expressions can use `V(n)`, `VM(n)`, `VP(n)`, `P(n)`, `Q(n)`, `I(branch)`, `IM(branch)`, device states `@xname[state]` and `time`.
+
+```{code} spice
+:caption: my_smib.cir — probes
+.probe tran delta=par('@xvsg[delta]') Ppcc=par('P(pcc)') Vpcc=vm(pcc)
+.end
+```
+
+(guide-n-event)=
+### Step 8 — Fault clearing on an event (optional)
+
+Instead of a fixed recovery time, clear the fault when the converter angle $\delta$ reaches $\delta_{clear}$. `.meas tran name WHEN expr=value CROSS=1 FROM=t` defines the event: the first crossing after `FROM`. Its name in braces is the detected time (`inf` until it fires) and can be used as a PWL time; knots not reached yet are ignored, so the waveform holds until the event.
 
 $$
-\begin{aligned}
-A_{ref}(t) = 1 &- (1-V_f)\operatorname{clip}\!\left(\frac{t-t_{f}}{T_{fall}},0,1\right)\\
-&+ (1-V_f)\operatorname{clip}\!\left(\frac{t-t_{c}}{T_{rise}},0,1\right)
-\end{aligned}
+h(\bm x)=\sin\frac{\delta-\delta_{clear}}{2}=0
 $$
 
-```{code} python
-:caption: __init__ — references
-# Grid voltage ramps down at the fault and back up at clearing
-# (self.eventTime_s, which an angle-based clearing event sets later).
-fallDuration = max(p["faultComplete_s"] - p["faultStart_s"], np.finfo(float).eps)
-riseDuration = max(p["recoveryComplete_s"] - p["recoveryStart_s"], np.finfo(float).eps)
-refs = {
-    str(vsg.uref[0]): p["Pref"],
-    str(vsg.uref[1]): p["Vref"],
-    str(vsg.uref[2]): p["wref"],
-    str(source.uref[0]): lambda t: float(
-        1 - (1 - p["faultVoltage"]) * np.clip((t - p["faultStart_s"]) / fallDuration, 0, 1)
-        + (1 - p["faultVoltage"]) * np.clip((t - self.eventTime_s) / riseDuration, 0, 1)
-    ),
-}
+```{code} spice
+:caption: my_smib.cir — angle-based clearing (replaces recoveryStart_s)
+.param clearAngle={-pi/3} minimumFault=0.5
+Xgrid inf 0 Infbus
++ Aref=PWL(0 1 {faultStart_s} 1 {faultComplete_s} {faultVoltage} {clear} {faultVoltage} {clear+1m} 1)
+.meas tran clear WHEN sin((@xvsg[delta]-clearAngle)/2)=0 CROSS=1 FROM={faultStart_s+minimumFault}
 ```
 
-(guide-s-buses)=
-### Step 5 — Place the devices on buses
+::::{dropdown} Full file: codesimpy/systems/SMIB_NL__GFM_A_C_L.cir
+```{code} spice
+:caption: codesimpy/systems/SMIB_NL__GFM_A_C_L.cir
+SMIB · GFM_A_C_L (netlist)
+* GFM_A_C_L on an infinite bus through the grid branch Rg + jLg: the netlist
+* twin of SMIB__GFM_A_C_L (time-based clearing), written in docs/guide.md.
+.options sbase=8100 freq=50 units=pu
+.param SCR=2 rho=0.1 faultVoltage=0.5
++ faultStart_s=0.2 faultComplete_s=0.201 recoveryStart_s=1 recoveryComplete_s=1.001
 
-`Vdev` and `Idev` have one entry per bus. The single bus has the infinite bus as voltage port and the converter as current port, so no `ZeroCurrent` is needed. Extra keys are handles for your own code.
+* Converter at the PCC (no capacitor: the PCC is reduced exactly).
+Xvsg pcc 0 GFM_A_C_L Lf=0.07 Rv=0.05 Lv=0.01 Imax=1.5 Kp=0.05 Kp_cc=20 Ki_cc=5
++ Pref=1 Vref=1.1 wref=1
 
-```{code} python
-:caption: __init__ — buses
-devices = {
-    "Vdev": [source], "Idev": [vsg],
-    "vsg": vsg, "source": source,
-}
-```
+* Grid branch: one card for the series R and L.
+Lgrid pcc inf {1/(SCR*sqrt(1+rho^2))} R={rho/(SCR*sqrt(1+rho^2))}
 
-(guide-s-network)=
-### Step 6 — Network
+* Infinite bus with a voltage dip from faultStart_s to recoveryStart_s.
+Xgrid inf 0 Infbus
++ Aref=PWL(0 1 {faultStart_s} 1 {faultComplete_s} {faultVoltage} {recoveryStart_s} {faultVoltage} {recoveryComplete_s} 1)
 
-`A` is the bus × branch incidence matrix ($+1$ where a branch leaves a bus, $-1$ where it enters); `R` and `L` have one value per branch. Each branch $k$ adds $L_k\,\dot{\bm i}_k=\bm v_{from}-\bm v_{to}-R_k\bm i_k$ in $\alpha\beta$. Here the only branch is inside the device, so `A` is $1\times0$.
-
-```{code} python
-:caption: __init__ — network
-# There is one physical node and no explicit branch. Rg/Lg live in
-# GFM_A_C_L, including the line-inductor transient, and reconstruct
-# the converter-side PCC.
-network = {
-    "A": np.empty((1, 0)), "R": [], "L": [],
-    "busNames": ["Infinite bus"],
-}
-```
-
-(guide-s-build)=
-### Step 7 — Build the model
-
-`super().__init__` assembles the device and network equations and compiles them. Then set the solver options, `parameters` and `parameterNames` (shown in the VS Code parameter editor).
-
-```{code} python
-:caption: __init__ — build
-base = {
-    "Vbase": p["Vbase"], "Sbase": p["Sbase"],
-    "frequency_Hz": p["frequency_Hz"],
-}
-super().__init__(type(self).__name__, network, devices, base, refs)
-self.solverSettings = {
-    "method": "RK45",
-    "max_step": 5e-3 / (2 * np.pi * self.base["frequency_Hz"]),
-    "rtol": 1e-3,
-    "atol": 1e-5,
-}
-self.parameters = p
-self.parameterNames = list(p)
-```
-
-(guide-s-events)=
-### Step 8 — Fault clearing event (optional)
-
-With `clearMode="angle"` the fault is cleared when $\delta$ reaches $\delta_{clear}$. `eventStartTime_s` arms the event; `eventHandler` returns a value whose zero crossing is the event, and the detected time is stored in `self.eventTime_s`, which the reference of step 4 uses as $t_c$:
-
-$$
-h(\bm x)=\sin\frac{\delta-\delta_{clear}}{2}
-$$
-
-```{code} python
-:caption: __init__ — event, and eventHandler
-self.clearingState = p["clearingState"]
-self.eventName = "faultClearing"
-self.eventTime_s = p["recoveryStart_s"]
-if p["clearMode"] == "angle":
-    self.eventTime_s = np.inf
-    self.eventStartTime_s = (
-        p["faultStart_s"] + p["minimumFaultDuration_s"]
-    )
-self.eventStateIndex = self.stateNames.index(
-    f"{self.clearingState}{self.devices['vsg'].index}"
-)
-
-
-def eventHandler(self, _time_s: float, state: np.ndarray) -> float:
-    return float(np.sin(
-        (state[self.eventStateIndex] - self.parameters["clearAngle_rad"]) / 2
-    ))
-```
-
-(guide-s-signals)=
-### Step 9 — Output signals
-
-`calculateSignals` returns the plotted signals. `busSignals` gives |V|, angle, P, Q and line currents; add your own. `state` has one row per time sample. Here the terminal voltage $\bm v_t$ is reconstructed from the states as in step 3 and the power is $P=\bm v_t\cdot\bm i_L$, $Q=v_{t,q}i_d-v_{t,d}i_q$.
-
-```{code} python
-:caption: calculateSignals (beginning)
-def calculateSignals(self, time_s: Any, state: Any, net: dict[str, Any]):
-    time_s, state = np.asarray(time_s), np.asarray(state)
-    signals = self.busSignals(net, [0], 0)
-    vsg = self.devices["vsg"]
-
-    def states(*names):
-        indices = [
-            self.stateNames.index(f"{name}{vsg.index}") for name in names
-        ]
-        return state[:, indices]
-
-    current = states("iLd", "iLq")
-    reference = states("irefd", "irefq")
-    theta = states("theta")[:, 0]
-    delta = states("delta")[:, 0]
-```
-
-```{code} python
-:caption: calculateSignals (end)
-signals.update({
-    "pccVoltage": np.hypot(vd, vq),
-    "gridVoltage": np.abs(grid),
-    "vd": vd,
-    "vq": vq,
-    "activePower": (
-        vd * current[:, 0] + vq * current[:, 1]
-    )[:, None],
-    "reactivePower": (
-        vq * current[:, 0] - vd * current[:, 1]
-    )[:, None],
-    "irefDQ": limitedReference,
-    "filterCurrentMagnitude": np.hypot(
-        current[:, 0], current[:, 1],
-    ),
-    "delta": (delta + np.pi) % (2 * np.pi) - np.pi,
-    "dot_delta": np.zeros_like(delta),
-})
-if time_s.size > 1:
-    signals["dot_delta"] = np.gradient(np.unwrap(delta), time_s)
-return signals
-```
-
-::::{dropdown} Full file: codesimpy/systems/smib_gfm_a_c_l.py
-```{code} python
-:caption: codesimpy/systems/smib_gfm_a_c_l.py
-"""SMIB__GFM_A_C_L: no-capacitor GFM connected directly to an infinite bus."""
-
-from typing import Any
-
-import numpy as np
-
-from ..components import GFM_A_C_L, Infbus
-from ..core import System
-
-
-class SMIB__GFM_A_C_L(System):
-    """SMIB · GFM_A_C_L: virtual admittance + current PI, circular current-reference limit, no terminal
-    capacitor; the grid impedance is embedded in the device (current port)."""
-
-    @staticmethod
-    def defaultParameters(overrides=None):
-        p = {
-            "Vbase": 1, "Sbase": 8100, "frequency_Hz": 50,
-            "SCR": 2, "rho": 0.1,
-            "Pref": 1, "Vref": 1.1, "wref": 1,
-            "Lf": 0.07, "Rv": 0.05, "Lv": 0.01,
-            "Imax": 1.5, "Kp": 0.05, "Kp_cc": 20, "Ki_cc": 5,
-            "clearMode": "time", "clearAngle_rad": -np.pi / 3,
-            "faultStart_s": 0.2, "faultComplete_s": 0.201,
-            "minimumFaultDuration_s": 0.5, "recoveryStart_s": 1,
-            "recoveryComplete_s": 1.001, "faultVoltage": 0.5,
-            "validationTime_s": 2, "outputStep_s": 1e-4,
-            "residualTolerance": 1e-4, "clearingState": "delta",
-        }
-        p.update(overrides or {})
-        p["wBase"] = 2 * np.pi * p["frequency_Hz"]
-        p["Lg"] = 1 / (p["SCR"] * np.sqrt(1 + p["rho"]**2))
-        p["Rg"] = p["rho"] * p["Lg"]
-        p["breakpoints_s"] = [p["faultStart_s"], p["faultComplete_s"]]
-        p["breakpoints_s"] += (
-            [p["recoveryStart_s"], p["recoveryComplete_s"]]
-            if p["clearMode"] == "time"
-            else [p["faultStart_s"] + p["minimumFaultDuration_s"]]
-        )
-        return p
-
-    def __init__(self, p: dict[str, Any]) -> None:
-        vsg = GFM_A_C_L(p["Vbase"], p["Sbase"], "vsg")
-        for name in ("Lf", "Rv", "Lv", "Rg", "Lg", "Imax", "Kp", "Kp_cc", "Ki_cc"):
-            vsg.p[name]["num"] = p[name]
-
-        source = Infbus(p["Vbase"], p["Sbase"], "grid")
-        # Grid voltage ramps down at the fault and back up at clearing
-        # (self.eventTime_s, which an angle-based clearing event sets later).
-        fallDuration = max(p["faultComplete_s"] - p["faultStart_s"], np.finfo(float).eps)
-        riseDuration = max(p["recoveryComplete_s"] - p["recoveryStart_s"], np.finfo(float).eps)
-        refs = {
-            str(vsg.uref[0]): p["Pref"],
-            str(vsg.uref[1]): p["Vref"],
-            str(vsg.uref[2]): p["wref"],
-            str(source.uref[0]): lambda t: float(
-                1 - (1 - p["faultVoltage"]) * np.clip((t - p["faultStart_s"]) / fallDuration, 0, 1)
-                + (1 - p["faultVoltage"]) * np.clip((t - self.eventTime_s) / riseDuration, 0, 1)
-            ),
-        }
-        devices = {
-            "Vdev": [source], "Idev": [vsg],
-            "vsg": vsg, "source": source,
-        }
-        # There is one physical node and no explicit branch. Rg/Lg live in
-        # GFM_A_C_L, including the line-inductor transient, and reconstruct
-        # the converter-side PCC.
-        network = {
-            "A": np.empty((1, 0)), "R": [], "L": [],
-            "busNames": ["Infinite bus"],
-        }
-        base = {
-            "Vbase": p["Vbase"], "Sbase": p["Sbase"],
-            "frequency_Hz": p["frequency_Hz"],
-        }
-        super().__init__(type(self).__name__, network, devices, base, refs)
-        self.solverSettings = {
-            "method": "RK45",
-            "max_step": 5e-3 / (2 * np.pi * self.base["frequency_Hz"]),
-            "rtol": 1e-3,
-            "atol": 1e-5,
-        }
-        self.parameters = p
-        self.parameterNames = list(p)
-        self.clearingState = p["clearingState"]
-        self.eventName = "faultClearing"
-        self.eventTime_s = p["recoveryStart_s"]
-        if p["clearMode"] == "angle":
-            self.eventTime_s = np.inf
-            self.eventStartTime_s = (
-                p["faultStart_s"] + p["minimumFaultDuration_s"]
-            )
-        self.eventStateIndex = self.stateNames.index(
-            f"{self.clearingState}{self.devices['vsg'].index}"
-        )
-
-    def eventHandler(self, _time_s: float, state: np.ndarray) -> float:
-        return float(np.sin(
-            (state[self.eventStateIndex] - self.parameters["clearAngle_rad"]) / 2
-        ))
-
-    def calculateSignals(self, time_s: Any, state: Any, net: dict[str, Any]):
-        time_s, state = np.asarray(time_s), np.asarray(state)
-        signals = self.busSignals(net, [0], 0)
-        vsg = self.devices["vsg"]
-
-        def states(*names):
-            indices = [
-                self.stateNames.index(f"{name}{vsg.index}") for name in names
-            ]
-            return state[:, indices]
-
-        current = states("iLd", "iLq")
-        reference = states("irefd", "irefq")
-        theta = states("theta")[:, 0]
-        delta = states("delta")[:, 0]
-        grid = net["busVoltage"][:, 0]
-        gridD = grid.real * np.cos(theta) + grid.imag * np.sin(theta)
-        gridQ = -grid.real * np.sin(theta) + grid.imag * np.cos(theta)
-        wColumn = self.referenceNames.index(str(vsg.uref[2]))
-        w = net["referenceTrace"][:, wColumn]
-        gridSideD = (
-            gridD + vsg.p["Rg"]["num"] * current[:, 0]
-            - w * vsg.p["Lg"]["num"] * current[:, 1]
-        )
-        gridSideQ = (
-            gridQ + vsg.p["Rg"]["num"] * current[:, 1]
-            + w * vsg.p["Lg"]["num"] * current[:, 0]
-        )
-
-        referenceMagnitude = np.hypot(reference[:, 0], reference[:, 1])
-        limitedReference = reference * np.minimum(
-            1,
-            vsg.p["Imax"]["num"]
-            / np.maximum(referenceMagnitude, np.finfo(float).eps),
-        )[:, None]
-        controllerVoltage = (
-            vsg.p["Kp_cc"]["num"] * (limitedReference - current)
-            + vsg.p["Ki_cc"]["num"] * states("xccd", "xccq")
-        )
-        currentDerivative = (
-            controllerVoltage
-            - 0.5 * np.column_stack((gridSideD, gridSideQ))
-        ) / (vsg.p["Lf"]["num"] + 0.5 * vsg.p["Lg"]["num"])
-        vd = gridSideD + vsg.p["Lg"]["num"] * currentDerivative[:, 0]
-        vq = gridSideQ + vsg.p["Lg"]["num"] * currentDerivative[:, 1]
-        signals.update({
-            "pccVoltage": np.hypot(vd, vq),
-            "gridVoltage": np.abs(grid),
-            "vd": vd,
-            "vq": vq,
-            "activePower": (
-                vd * current[:, 0] + vq * current[:, 1]
-            )[:, None],
-            "reactivePower": (
-                vq * current[:, 0] - vd * current[:, 1]
-            )[:, None],
-            "irefDQ": limitedReference,
-            "filterCurrentMagnitude": np.hypot(
-                current[:, 0], current[:, 1],
-            ),
-            "delta": (delta + np.pi) % (2 * np.pi) - np.pi,
-            "dot_delta": np.zeros_like(delta),
-        })
-        if time_s.size > 1:
-            signals["dot_delta"] = np.gradient(np.unwrap(delta), time_s)
-        return signals
+.tran 0.1m 2
+.options reltol=1e-6 abstol=1e-9
+.probe tran delta=par('@xvsg[delta]') Ppcc=par('P(pcc)') Vpcc=vm(pcc)
+.end
 ```
 ::::
 
-(guide-netlist)=
-## 5. Systems from a netlist
+This file ships as the built-in system `SMIB_NL__GFM_A_C_L`; copy it to your workspace as a starting point. Built-in netlists live in `codesimpy/systems/` and become systems named after the file; [CIGRE14_NL__GFM_A_C_LC__GFL_C_F_L.cir](../systems/CIGRE14_NL__GFM_A_C_LC__GFL_C_F_L.cir) is a larger example and [TEST5_NL__GFM_A_C_L__GFL_C_F_L.cir](../systems/TEST5_NL__GFM_A_C_L__GFL_C_F_L.cir) uses every branch form and bus reduction.
 
-Instead of writing a `System` class you can describe the study as a SPICE netlist (`.cir`). `NetlistSystem` builds the network, devices, references, the state-triggered event and the output signals from it. Every `.cir` file in the user workspace appears in VS Code like an `@system` class (id: the file name, label: the title line). Built-in netlists live in `systems/` and become systems named after the file; [systems/CIGRE14_NL__GFM_A_C_LC__GFL_C_F_L.cir](../systems/CIGRE14_NL__GFM_A_C_LC__GFL_C_F_L.cir) is a complete example.
-
-```
-SMIB with a GFL                                   <- line 1 is always the title
-.options sbase=8100 freq=50 units=pu
-.param SCR=2 rho=0.25 Pref=1 Qref=-0.1 faultVoltage=0.5
-Xgrid pcc 0 Infbus kA=100 Aref=PWL(0 1 0.3 1 0.301 {faultVoltage} 0.6 {faultVoltage} 0.601 1)
-Xgfl  pcc 0 GFL_C_F_L KpPll=0.2 KiPll=0.2
-+ Lg={1/(SCR*sqrt(1+rho^2))} Rg={rho/(SCR*sqrt(1+rho^2))} Idref={Pref} Iqref={-Qref}
-.tran 0.1m 1
-.probe tran Igfl=par('hypot(@xgfl[id], @xgfl[iq])') V=vm(pcc)
-.end
-```
+(guide-n-reference)=
+### Netlist reference
 
 **Standard SPICE.** `*` comment lines, `;` and ` $ ` inline comments, `+` continuation; cards, names, nodes and parameters are case-insensitive; ground is `0` (`gnd`); suffixes `f p n u m k meg g t` with trailing unit letters ignored. A trailing `F` alone is *femto*, as in every SPICE: write `0.13u` or `0.13uF`, never `1.3e-7F`. Expressions go in `{...}` or `'...'`.
 
@@ -1024,7 +712,9 @@ Xgfl  pcc 0 GFL_C_F_L KpPll=0.2 KiPll=0.2
 * - Card
   - Meaning
 * - `Rname n1 n2 value`, `Lname n1 n2 value`
-  - Series branch (Ω, H). One R and one L on the same node pair form one RL branch; an R and an L in series through a node without devices are merged by Kron reduction. Every final branch needs an inductance.
+  - Series branch (Ω, H, or pu with `units=pu`). One R and one L on the same node pair form one RL branch. `L = 0` is allowed, except on a branch between two buses with voltage devices.
+* - `Lname n1 n2 value R=r`, `Rname n1 n2 value L=l`
+  - One series RL branch per card (HSPICE style); several such cards between the same buses are parallel branches.
 * - `Cname n 0 value`
   - Shunt capacitor (F); becomes the bus's `Capacitor` voltage port.
 * - `Xname n+ 0 Model par=val ...`
@@ -1057,14 +747,17 @@ In `.meas` and `.probe` expressions: `V(n)` (α-axis instantaneous), `VM(n)`, `V
 * - `.hdl file.py`
   - Imports a Python file so that its `@device` classes can be used as `X` models.
 * - `{name}` of the `.meas` card
-  - The detected event time (`inf` until it fires), usable as a PWL time: knots not reached yet are ignored, so the waveform holds until the event. Example (clear the fault when the GFM angle enters (-π/3, 0)): `Aref=PWL(0 1 0.2 1 0.2 0 {clear} 0 {clear} 1)` with `.meas tran clear WHEN min(wrap(@xvsg[delta])+pi/3, -wrap(@xvsg[delta]))=0 RISE=1 FROM=0.25`.
+  - The detected event time (`inf` until it fires), usable as a PWL time: knots not reached yet are ignored, so the waveform holds until the event.
 * - `P(n)`, `Q(n)`, `wrap(x)`
   - Bus active/reactive power injection; angle wrapped to (-π, π].
 :::
 
-A bus takes at most one voltage-port and one current-port device. A bus with only a voltage-port device gets a `ZeroCurrent`; a current-port device needs a `C` or a voltage-port device on its bus. Errors name the file and line.
+A bus takes at most one voltage-port device (a `C` counts as one) and any number of current-port devices. A bus without a voltage port is removed exactly ({ref}`guide-reduction`); `V(n)`, `P(n)` and `I(...)` still work on it. Errors name the file and line.
 
-**User components.** Mark a component with `@device` so a netlist can use it by name:
+(guide-reduction)=
+**Buses without a voltage port.** Connected buses without a voltage device (with or without current devices) form a cluster. `RLGrid.localDAEreduction` writes the cluster as the DAE $\bm E\,\dot{\bm x}=\bm f(\bm x,\bm y)$, $\bm 0=\bm g(\bm x,\bm y)$: states $\bm x$ are the device states and the branch currents, $\bm y$ the bus voltages, $\bm g$ the KCL of the cluster buses. It differentiates the KCL combinations free of $\bm y$, solves the result for $\bm y$ and removes one branch current per such combination. The reduction is exact; it raises an error when the equations are not linear in $\bm y$ (for example `GFL_C_F_L`, whose PLL and LVRT depend nonlinearly on the terminal voltage: give its bus a `C`) or when a current device has no branch to a voltage source. With several branches at a bus with current devices a warning lists the removed states.
+
+**User components.** Mark a component with `@device` so a netlist can use it by name (load its file with `.hdl` if it is not in the workspace):
 
 ```python
 from codesimpy import Device, device
@@ -1074,16 +767,14 @@ class MyGFM(Device):
     ...
 ```
 
-A `.cir` file needs no Python class: it is a system by itself. Only if a netlist is not enough, write an `@system` class `class MyStudy(NetlistSystem, netlistFile="study.cir")` (path relative to the Python file) that overrides `calculateSignals` or `eventHandler`.
-
 (guide-run)=
-## 6. Run it
+## 5. Run it
 
 ### In VS Code
 
 ![alt text](figures/image.png)
-1. Select your workspace folder that includes the system python file, then restart the Python backend (power button in the topology toolbar).
-2. Select the system by its `label`, edit parameters, and run {kbd}`EMT`, {kbd}`RMS`, {kbd}`Small signal` or {kbd}`Interaction`. Files that fail to import are reported with their error.
+1. Select your workspace folder that contains the `.cir` file (and any `@device` component files), then restart the Python backend (power button in the topology toolbar).
+2. Select the system by its title, edit the `.param` values, and run {kbd}`EMT`, {kbd}`RMS`, {kbd}`Small signal` or {kbd}`Interaction`; {kbd}`Stop` ends a running simulation and keeps the samples computed so far. Netlist errors are reported with their file and line.
 3. Check the equations in Small signal → *Symbolic model*, one device at a time.
 
 ### From Python
@@ -1092,10 +783,13 @@ A `.cir` file needs no Python class: it is a system by itself. Only if a netlist
 :caption: session.py
 import numpy as np
 
-from codesimpy.systems import SMIB__GFM_A_C_L
+from codesimpy import NetlistSystem
 
-p = SMIB__GFM_A_C_L.defaultParameters({"SCR": 2})
-system = SMIB__GFM_A_C_L(p)
+# A system class from a netlist file; built-in netlists are in codesimpy.systems
+# (e.g. codesimpy.systems.SMIB_NL__GFM_A_C_L).
+MySMIB = type("my_smib", (NetlistSystem,), {}, netlistFile="my_smib.cir")
+p = MySMIB.defaultParameters({"SCR": 2})   # .param overrides
+system = MySMIB(p)
 print(system.stateNames)
 
 # Operating point: power flow -> initFromPowerFlow -> f = 0 for every non-theta state.
@@ -1113,7 +807,7 @@ print(rms["differentialStateNames"])   # thetas + rmsDynamicIndices
 ```
 
 (guide-troubleshooting)=
-## 7. Troubleshooting
+## 6. Troubleshooting
 
 :::{list-table}
 :header-rows: 1
@@ -1131,7 +825,9 @@ print(rms["differentialStateNames"])   # thetas + rmsDynamicIndices
 * - `Jacobian contains unresolved symbolic derivatives`
   - A non-differentiable function (`Piecewise`, `Min`, `Max`, `sign`).
 * - System missing in VS Code
-  - No `@system` on the class, an import error in the file (shown in the error list), a duplicate `id`, or the backend was not restarted.
+  - The `.cir` file is outside the selected workspace folder, it has an error (shown in the error list with its line), two files share a name, or the backend was not restarted.
+* - `cannot be reduced to an ODE`
+  - A bus without a voltage port holds a device that is nonlinear in its terminal voltage (e.g. `GFL_C_F_L`): add a `C` at that bus.
 :::
 
 For the equations of the existing devices and systems, see the [component reference](./components.md) and the [system reference](./systems.md).

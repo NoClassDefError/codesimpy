@@ -118,9 +118,22 @@ class Device(ABC):
 
     #: Local indices of the frame-angle states ``theta`` (no steady-state row).
     thetaIndices: tuple[int, ...] = ()
+    #: Local indices of the other angle states (the model is 2*pi-periodic in them,
+    #: e.g. a GFM ``delta``). They and ``thetaIndices`` are wrapped to [-pi, pi).
+    angleIndices: tuple[int, ...] = ()
     #: Local indices of the slow states that stay dynamic in the RMS model
     #: besides ``theta``.
     rmsDynamicIndices: tuple[int, ...] = ()
+
+    def calculateSignals(self, time_s: Any, x: Any, u: Any, uref: Any) -> dict[str, Any]:
+        """Output signals of this device that are neither states nor network signals.
+
+        Per sample: ``x`` (samples x states), ``u`` (samples x 2, the port input in
+        alpha-beta on the device base: the terminal voltage of a current-port device,
+        the current of a voltage-port device), ``uref`` (samples x references).
+        Returns ``{name: array (samples,)}`` on the device base. Default: none.
+        """
+        return {}
 
     def getFInit(self) -> sp.Matrix:
         """The EMT rows ``f_i`` of every state except ``theta`` (steady state: ``0 = f_i``)."""
