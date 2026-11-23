@@ -251,6 +251,8 @@ class OutputJsonFactory:
                 "referenceNames": simulation.get("referenceNames", self.system.referenceNames),
                 "referenceTrace": self.jsonSafe(simulation["referenceTrace"]),
             } if "state" in simulation and "referenceTrace" in simulation else {}),
+            # Netlist .meas results ({name: value}; None when a measurement failed).
+            "measurements": self.jsonSafe(simulation.get("measurements", {})),
             "smallSignal": self.latestSmallSignal,
             "interactionAnalysis": self.latestInteractionAnalysis,
             "rmsSimulation": self.latestRMS,

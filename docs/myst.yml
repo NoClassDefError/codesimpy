@@ -10,6 +10,7 @@ project:
     - file: guide.md
     - file: components.md
     - file: systems.md
+    - file: validation.md
 site:
   template: book-theme
   options:

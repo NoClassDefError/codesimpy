@@ -733,7 +733,40 @@ This file ships as the built-in system `SMIB_NL__GFM_A_C_L`; copy it to your wor
   - Extra output signals, shown in the frontend.
 :::
 
-In `.meas` and `.probe` expressions: `V(n)` (α-axis instantaneous), `VM(n)`, `VP(n)` (rad, relative to the reference bus), `I(Rname|Lname)`, `IM(...)`, device states `@xname[state]` and `time`.
+In `.meas` and `.probe` expressions: `V(n)` (α-axis instantaneous), `V(n1,n2)`, `VM(n)`, `VM(n1,n2)`, `VP(n)` (rad, relative to the reference bus), `I(Rname|Lname)`, `IM(...)`, device states `@xname[state]` and `time`.
+
+**LTspice compatibility.** Netlists written for LTspice (and HSPICE/ngspice) load as long as their circuit is made of R, L, C and X cards:
+
+:::{list-table}
+:header-rows: 1
+
+* - Card or syntax
+  - Meaning
+* - `+ - * / %`, `**` and `^`, `== != < > <= >=`, `& | !` (`&& ||`), `c ? a : b`
+  - Expression operators, lowest precedence first: `?:`, logic, comparisons, `+ -`, `* / %`, unary, power. `^` is **power** (HSPICE/ngspice; LTspice reads it as XOR — write `xor(a, b)`). True is a value above 0.5; comparisons and logic give 1 or 0.
+* - `if limit table u uramp sgn floor ceil int round mod pwr pwrs cbrt ln asin acos sinh cosh tanh buf inv xor`
+  - LTspice functions, next to `sqrt exp log log10 sin cos tan atan atan2 abs min max pow hypot wrap`; constants `pi boltz echarge planck kelvin gmin`. Numbers may use a suffix as decimal point (`6k34` = 6340).
+* - `.param` in any order
+  - A value may use a parameter defined further down.
+* - `.func name(a, b) {expr}`
+  - A function of its arguments, `.param` values and other functions. It cannot read signals; pass them as arguments: `par('pw(V(a), I(R1))')`.
+* - `.model name Model(par=val ...)`, `.model name ako:other (par=val ...)`
+  - A device model with default parameters (and references); `X` cards name it like a device class and override any value.
+* - `.subckt name pin ... [params: a=1 ...]` ... `.ends`
+  - A subcircuit of R, L, C, X, `.param` (local defaults) and `.model` cards. `Xname node ... name a=2` instantiates it; its elements and inner nodes are named `xname:inner` (`V(x1:mid)`, `@x1:xgfm[delta]`), `0` and `.global` nodes are shared. Subcircuits may nest.
+* - `.lib file section`, `.lib file`, `.lib section` ... `.endl`
+  - Read the `.model`, `.subckt`, `.param` and `.func` cards of a library (one section, or the whole file).
+* - `.meas [tran] name FIND\|DERIV expr AT=t`, `... WHEN expr=value [TD=t] [RISE\|FALL\|CROSS=n\|LAST]`
+  - Post-run: value (or derivative) at a time or a crossing.
+* - `.meas name AVG\|MAX\|MIN\|PP\|RMS\|INTEG expr [FROM=t] [TO=t]`
+  - Post-run: statistics over a window (whole run by default).
+* - `.meas name TRIG expr=value ... TARG expr=value ...`, `.meas name PARAM expr`
+  - Post-run: time between two crossings; an expression of earlier measurements and parameters.
+:::
+
+Post-run measurements are in `result["measurements"]` after `simulate` and in the VS Code output channel (`[meas] name = value`); a measurement that cannot be computed is `nan` (`FAILED`) with a warning. A `.meas ... WHEN` *without* `FIND` stays the state-triggered event of Step 8; its time is reported as a measurement too.
+
+Cards CodeSim does not run are **skipped with a warning** shown in VS Code: `.ac .dc .noise .tf .four .op .step .temp .wave .backanno .net .fra .ic .nodeset .savestate .loadstate .savebias .text .machine`, `.meas ac|dc|noise`, `.tran` modifiers (`startup`, `steady`, ...) and unknown `.options`. Elements other than R, L, C and X (D, Q, M, J, K, E, F, G, H, B, S, W, T, O, U, A, Z, V, I) are an error at their line, as are R/L/C instance parameters such as `Rser=`, `Rpar=` or `Cpar=`.
 
 **CodeSim extensions.**
 
@@ -755,7 +788,7 @@ In `.meas` and `.probe` expressions: `V(n)` (α-axis instantaneous), `VM(n)`, `V
 A bus takes at most one voltage-port device (a `C` counts as one) and any number of current-port devices. A bus without a voltage port is removed exactly ({ref}`guide-reduction`); `V(n)`, `P(n)` and `I(...)` still work on it. Errors name the file and line.
 
 (guide-reduction)=
-**Buses without a voltage port.** Connected buses without a voltage device (with or without current devices) form a cluster. `RLGrid.localDAEreduction` writes the cluster as the DAE $\bm E\,\dot{\bm x}=\bm f(\bm x,\bm y)$, $\bm 0=\bm g(\bm x,\bm y)$: states $\bm x$ are the device states and the branch currents, $\bm y$ the bus voltages, $\bm g$ the KCL of the cluster buses. It differentiates the KCL combinations free of $\bm y$, solves the result for $\bm y$ and removes one branch current per such combination. The reduction is exact; it raises an error when the equations are not linear in $\bm y$ (for example `GFL_C_F_L`, whose PLL and LVRT depend nonlinearly on the terminal voltage: give its bus a `C`) or when a current device has no branch to a voltage source. With several branches at a bus with current devices a warning lists the removed states.
+**Buses without a voltage port.** Connected buses without a voltage device (with or without current devices) form a cluster. `RLGrid.localDAEreduction` writes the cluster as the DAE $\bm E\,\dot{\bm x}=\bm f(\bm x,\bm y)$, $\bm 0=\bm g(\bm x,\bm y)$: states $\bm x$ are the device states and the branch currents, $\bm y$ the bus voltages, $\bm g$ the KCL of the cluster buses. It differentiates the KCL combinations free of $\bm y$, solves the result for $\bm y$ and removes one branch current per such combination. The reduction is exact; it raises an error when the equations are not linear in $\bm y$ (for example `GFL_C_F_L`, whose PLL and LVRT depend nonlinearly on the terminal voltage: give its bus a `C`) or when a current device has no branch to a voltage source. Every reduced bus is reported with a warning (shown in VS Code when the system loads) listing the removed states.
 
 **User components.** Mark a component with `@device` so a netlist can use it by name (load its file with `.hdl` if it is not in the workspace):
 

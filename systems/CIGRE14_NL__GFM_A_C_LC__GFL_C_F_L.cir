@@ -2,7 +2,9 @@ CIGRE14 (netlist) · GFM_A_C_LC at bus 9 + GFL_C_F_L at bus 7, fault cleared whe
 * Full CIGRE MV benchmark feeder, per unit on 25 MVA / 20 kV. Line charging is lumped as
 * half the line capacitance at each end bus; loads are series RL branches to ground.
 * Card order fixes the bus order (source, 1..11, ground) and the branch order (lines, loads).
-.options sbase=25meg vbase=20k freq=50 units=pu method=dop853 reltol=1e-3 abstol=1e-5 residualtol=1e-4
+.options sbase=25meg vbase=20k freq=50 units=pu method=radau reltol=1e-3 abstol=1e-5 residualtol=1e-4
+* .options sbase=25meg vbase=20k freq=50 units=pu method=dop853 reltol=1e-3 abstol=1e-5 residualtol=1e-4
+
 * Time mode (clearMode = "time"): the fault is cleared at a fixed time.
 * .param faultStart_s=0.10 faultComplete_s=0.101 recoveryStart_s=0.25 recoveryComplete_s=0.2501 faultVoltage=0.1
 * Angle mode (clearMode = "angle"): a bolted fault at faultStart_s, cleared when the GFM angle enters

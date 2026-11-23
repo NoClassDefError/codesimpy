@@ -1,7 +1,7 @@
 SMIB · GFM_A_C_L (netlist)
 * GFM_A_C_L on an infinite bus through the grid branch Rg + jLg: the netlist
 * twin of SMIB__GFM_A_C_L (time-based clearing), written in docs/guide.md.
-.options sbase=8100 freq=50 units=pu
+.options sbase=8100 freq=50 units=pu method=radau reltol=1e-3 abstol=1e-5 residualtol=1e-4
 .param SCR=2 rho=0.1 faultVoltage=0.5
 + faultStart_s=0.2 faultComplete_s=0.201 recoveryStart_s=1 recoveryComplete_s=1.001
 
